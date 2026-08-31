@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Plantilla del agente launchd. launchd NO expande "~", así que reemplaza las
+  rutas absolutas de abajo por las de tu equipo antes de instalarlo:
+
+    1. La ruta a tu intérprete de Python (el que tenga `requests` y
+       `playwright` instalados). Averíguala con:  which python3
+    2. La ruta absoluta a esta carpeta del proyecto (en 3 lugares).
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.inacap.archiver</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/ABSOLUTE/PATH/TO/python3</string>
+    <string>archiver.py</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/ABSOLUTE/PATH/TO/inacap-archiver</string>
+
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>8</integer>
+    <key>Minute</key><integer>0</integer>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>/ABSOLUTE/PATH/TO/inacap-archiver/archiver.log</string>
+  <key>StandardErrorPath</key>
+  <string>/ABSOLUTE/PATH/TO/inacap-archiver/archiver.log</string>
+</dict>
+</plist>

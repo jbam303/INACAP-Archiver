@@ -1,0 +1,28 @@
+# Auth — never commit
+cookies.txt
+cookies*.txt
+*.curlrc
+.env
+.env.*
+!.env.example  # the placeholder template is safe to publish
+
+# Downloaded course content + local run state
+archive/
+content/
+downloads/
+virtual.inacap.cl/
+manifest.json
+*.log
+.lock
+
+# Local tooling metadata (leaks absolute home paths)
+.atl/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS
+.DS_Store

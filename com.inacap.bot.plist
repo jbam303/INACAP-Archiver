@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Telegram bot agent. Keeps `archiver.py --bot` alive while the Mac is on:
+  it starts at login and launchd restarts it if it dies (KeepAlive).
+
+  Same rule as the archiver plist: launchd does NOT expand "~", so replace the
+  absolute paths below with yours before installing.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.inacap.bot</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/ABSOLUTE/PATH/TO/python3</string>
+    <string>archiver.py</string>
+    <string>--bot</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/ABSOLUTE/PATH/TO/inacap-archiver</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <!-- Don't hammer Telegram if the bot crash-loops on a bad token. -->
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+
+  <key>StandardOutPath</key>
+  <string>/ABSOLUTE/PATH/TO/inacap-archiver/bot.log</string>
+  <key>StandardErrorPath</key>
+  <string>/ABSOLUTE/PATH/TO/inacap-archiver/bot.log</string>
+</dict>
+</plist>
