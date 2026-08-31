@@ -23,6 +23,8 @@ herramienta se encarga de eso por ti: la configuras una vez y se mantiene sola.
 - 📥 **Descarga todo tipo de material**: los Recursos Digitales (paquetes
   interactivos), las presentaciones de asignatura y los archivos que suban
   (PDF, PPTX, DOCX, etc.).
+- 📝 **Guarda los talleres y tareas**, tanto el enunciado del docente como el
+  archivo que entregaste. Los cuestionarios quedan deliberadamente fuera.
 - 🗂️ **Organiza por ramo**, con carpetas de nombre legible (`Minería de Datos/`
   en lugar de `TI3061_ASP/`).
 - 🧠 **Solo descarga lo nuevo.** Mantiene un registro de lo ya descargado, así
@@ -31,7 +33,8 @@ herramienta se encarga de eso por ti: la configuras una vez y se mantiene sola.
   por su cuenta y continúa. Sin mantenimiento.
 - ☁️ **Respaldo en Google Drive** (opcional), con permisos mínimos: solo puede
   tocar su propia carpeta.
-- ⏰ **Se ejecuta solo, todos los días**, mediante un agente de macOS.
+- ⏰ **Se ejecuta solo, todos los días**, con el programador de tareas del
+  sistema (macOS, Linux o Windows).
 
 ---
 
@@ -64,22 +67,28 @@ El flujo completo:
 
 ## 📦 Requisitos
 
-- **macOS** (el agente que lo ejecuta automáticamente usa `launchd`)
+- **macOS, Linux o Windows** — cada uno con su programador de tareas
+  (`launchd`, `systemd` o el Programador de tareas; ver más abajo)
 - **Python 3.11 o superior**
 - `pip install requests playwright` — `requests` para las descargas, `playwright`
   para el inicio de sesión automático
 - **Opcional**: [`rclone`](https://rclone.org) para el respaldo en Drive
-  (`brew install rclone`)
+  (`brew install rclone`, `apt install rclone` o `winget install Rclone.Rclone`)
 
 ---
 
 ## 🚀 Instalación
 
 ```bash
-git clone https://github.com/<tu-usuario>/inacap-archiver.git
-cd inacap-archiver
+git clone https://github.com/jbam303/INACAP-Archiver.git
+cd INACAP-Archiver
 python3 -m pip install requests playwright
+python3 -m playwright install chromium
 ```
+
+El último paso solo hace falta si no tienes Google Chrome instalado: el inicio
+de sesión automático lo usa si está disponible y, si no, recurre al Chromium
+que trae Playwright.
 
 Luego configura el acceso (más abajo) y estará listo para ejecutarse.
 
@@ -138,7 +147,8 @@ Para respaldar en tu Drive se utiliza `rclone`, que gestiona todo el inicio de
 sesión con Google (no hay que programar nada):
 
 ```bash
-brew install rclone
+brew install rclone          # macOS · Linux: apt install rclone
+                             # Windows: winget install Rclone.Rclone
 rclone config       # nuevo remote → nómbralo "gdrive" → tipo "drive"
 ```
 
@@ -195,6 +205,7 @@ python3 archiver.py                # descarga lo nuevo (+ respaldo a Drive si es
 python3 archiver.py --login        # fuerza el inicio de sesión automático
 python3 archiver.py --bot          # atiende los comandos de Telegram
 python3 archiver.py --self-test    # verificaciones internas, sin conexión
+python3 archiver.py --retry-unsupported   # reintenta lo marcado como no soportado
 ```
 
 Para volver a descargar un recurso, elimina su entrada del `manifest.json`.
@@ -202,6 +213,11 @@ Para volver a descargar un recurso, elimina su entrada del `manifest.json`.
 ---
 
 ## ⏰ Ejecución automática diaria
+
+El script resuelve sus rutas a partir de su propia ubicación, así que no depende
+del directorio de trabajo: basta con invocarlo por ruta absoluta.
+
+### macOS (launchd)
 
 Edita las rutas en `com.inacap.archiver.plist` (launchd no expande `~`, así que
 necesita rutas absolutas: la de tu Python y la de esta carpeta). Luego:
@@ -219,6 +235,61 @@ launchctl list | grep inacap        # verificar que sigue activo
 launchctl unload ~/Library/LaunchAgents/com.inacap.archiver.plist   # desactivarlo
 ```
 
+### Linux (systemd)
+
+Crea `~/.config/systemd/user/inacap-archiver.service`:
+
+```ini
+[Unit]
+Description=Archivador INACAP
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 %h/inacap-archiver/archiver.py
+StandardOutput=append:%h/inacap-archiver/archiver.log
+StandardError=append:%h/inacap-archiver/archiver.log
+```
+
+Y `~/.config/systemd/user/inacap-archiver.timer`:
+
+```ini
+[Unit]
+Description=Archivador INACAP, todos los días a las 08:00
+
+[Timer]
+OnCalendar=*-*-* 08:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+`Persistent=true` es el equivalente al comportamiento de launchd: si el equipo
+estaba apagado a las 08:00, la ejecución se dispara al encenderlo.
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now inacap-archiver.timer
+loginctl enable-linger "$USER"   # que corra sin sesión abierta
+systemctl --user list-timers inacap-archiver.timer   # verificar
+```
+
+### Windows (Programador de tareas)
+
+```powershell
+schtasks /create /tn "INACAP Archiver" /sc daily /st 08:00 ^
+  /tr "pythonw \"%USERPROFILE%\inacap-archiver\archiver.py\""
+```
+
+`pythonw` evita que se abra una consola cada mañana. Para que se ejecute cuando
+el equipo estaba apagado a esa hora, marca **"Ejecutar la tarea lo antes posible
+tras un inicio programado que no se realizó"** en las propiedades de la tarea.
+
+```powershell
+schtasks /query /tn "INACAP Archiver"    # verificar
+schtasks /delete /tn "INACAP Archiver"   # desactivarlo
+```
+
 ### El bot como servicio
 
 Si además quieres que el bot atienda comandos siempre que el equipo esté
@@ -233,6 +304,11 @@ launchctl load ~/Library/LaunchAgents/com.inacap.bot.plist
 El registro queda en `bot.log`. **Solo funciona con el equipo encendido**: el
 bot mantiene una conexión de consulta saliente hacia Telegram, no hay ningún
 servidor escuchando.
+
+En **Linux** es un servicio de usuario con `ExecStart=... archiver.py --bot`,
+`Restart=always` y `WantedBy=default.target` (sin temporizador: se mantiene
+corriendo). En **Windows**, la misma tarea del punto anterior pero con
+`/sc onlogon` en lugar de `/sc daily /st 08:00`, apuntando a `--bot`.
 
 Las dos ejecuciones (la diaria y la de `/bajar`) comparten un archivo de bloqueo
 `.lock`, para que nunca se pisen escribiendo el `manifest.json`.
@@ -274,15 +350,19 @@ archive/
 ## ⚠️ Limitaciones actuales
 
 - Los paquetes **Articulate Storyline** (`story.php`) no se descargan: usan otro
-  formato sin el `runtime-data.js`. Se reportan como "skipped" y no interrumpen
-  la ejecución.
+  formato, sin el `runtime-data.js`. Quedan registrados en el manifiesto como
+  `unsupported` con su motivo, así dejan de reportarse como nuevos en cada
+  ejecución. `--retry-unsupported` vuelve a intentarlos cuando exista soporte.
+- Los **cuestionarios** (`mod/quiz`) no se tocan a propósito. Sin un intento
+  rendido no hay revisión que archivar, y estos cuestionarios permiten un solo
+  intento cronometrado: iniciarlo por accidente sería irreversible.
 - Los GIFs decorativos de gran tamaño (INACAP sube algunos de ~150 MB como
   "videos") se omiten por defecto, con un límite de 50 MB (`MAX_ASSET_MB` en el
   script).
 - Las carpetas vacías se mantienen vacías; cuando el profesor suba material, la
   siguiente ejecución lo descargará.
-- El bot depende del equipo: con el Mac apagado no responde. La ejecución diaria
-  sí se recupera sola al encenderlo.
+- El bot depende del equipo: apagado, no responde. La ejecución diaria sí se
+  recupera sola al encenderlo.
 
 ---
 

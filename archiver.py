@@ -117,7 +117,7 @@ def load_cookie(curlrc: str) -> str:
     path = ROOT / curlrc
     if not path.exists():
         sys.exit(f"Missing {curlrc} — export the session cookie into it (see README).")
-    m = re.search(r'cookie\s*=\s*"(.*)"', path.read_text())
+    m = re.search(r'cookie\s*=\s*"(.*)"', path.read_text(encoding="utf-8"))
     if not m:
         sys.exit(f"No cookie line found in {curlrc}.")
     return m.group(1)
@@ -143,12 +143,22 @@ def single_run():
 
     Two concurrent runs would download the same resource twice and interleave
     their writes to manifest.json, losing entries.
-    """
-    import fcntl
 
-    with open(LOCK, "w") as fh:
+    Both branches take an OS-level lock on an open handle, so the lock dies with
+    the process — a crashed run never leaves the next one shut out. There is no
+    portable stdlib call for this, hence the split: fcntl on POSIX, msvcrt on
+    Windows.
+    """
+    with open(LOCK, "w", encoding="utf-8") as fh:
         try:
-            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             raise Busy("another run is in progress")
         yield
@@ -168,7 +178,7 @@ def _load_env() -> dict:
     path = ROOT / ".env"
     env = {}
     if path.exists():
-        for line in path.read_text().splitlines():
+        for line in path.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if line and not line.startswith("#") and "=" in line:
                 k, v = line.split("=", 1)
@@ -196,7 +206,13 @@ def refresh_cookie() -> bool:
 
     print("Refreshing Moodle session (auto-login) ...", flush=True)
     with sync_playwright() as p:
-        browser = p.chromium.launch(channel="chrome", headless=True)
+        try:
+            browser = p.chromium.launch(channel="chrome", headless=True)
+        except Exception:
+            # channel="chrome" needs Google Chrome itself, which a Linux box
+            # often lacks. Fall back to Playwright's own build
+            # (`playwright install chromium`).
+            browser = p.chromium.launch(headless=True)
         page = browser.new_context(user_agent=USER_AGENT).new_page()
         page.goto(f"{MOODLE}/my/", wait_until="domcontentloaded", timeout=45000)
         page.fill("#userNameInput", user)
@@ -322,11 +338,12 @@ def discover(session) -> list[dict]:
 
 
 def load_manifest() -> dict:
-    return json.loads(MANIFEST.read_text()) if MANIFEST.exists() else {}
+    return json.loads(MANIFEST.read_text(encoding="utf-8")) if MANIFEST.exists() else {}
 
 
 def save_manifest(manifest: dict) -> None:
-    MANIFEST.write_text(json.dumps(manifest, indent=2, ensure_ascii=False))
+    MANIFEST.write_text(json.dumps(manifest, indent=2, ensure_ascii=False),
+                        encoding="utf-8")
 
 
 def dest_for(rec: dict) -> pathlib.Path:
@@ -528,7 +545,7 @@ def download_rise(url: str, dest: pathlib.Path) -> dict:
 
     dest.mkdir(parents=True, exist_ok=True)
     text = _render_markdown(course)
-    (dest / "content.md").write_text(text)
+    (dest / "content.md").write_text(text, encoding="utf-8")
 
     media_dir = dest / "media"
     media_dir.mkdir(exist_ok=True)
@@ -652,13 +669,19 @@ def _run(discover_only: bool, retry_unsupported: bool = False) -> str:
     return summarize(saved)
 
 
-def _tool_path(env_path: str) -> str:
+def _tool_path(env_path: str, posix: bool = os.name != "nt") -> str:
     """Where to look for external tools like rclone.
 
     launchd (and cron) hand a job a minimal PATH — /usr/bin:/bin:/usr/sbin:/sbin —
     with no Homebrew in it, so `which rclone` fails under the daily agent even
-    though it works in a terminal. Search the usual Homebrew prefixes too.
+    though it works in a terminal. Search the usual Homebrew prefixes too; on
+    Linux they just don't exist, which shutil.which skips harmlessly.
+
+    Windows has no Homebrew and separates PATH with ";", so its PATH is used
+    as-is — Task Scheduler hands the job the full system PATH anyway.
     """
+    if not posix:
+        return env_path
     return ":".join(p for p in (env_path, "/opt/homebrew/bin", "/usr/local/bin") if p)
 
 
@@ -894,13 +917,24 @@ def self_test() -> None:
     assert parse_command({"message": {"chat": {"id": 1}, "text": "hola"}}) == ("", "1")
     assert parse_command({"edited_message": {}}) == ("", "")  # nothing to serve
 
-    # launchd's minimal PATH must still find Homebrew tools.
-    assert _tool_path("/usr/bin:/bin") == "/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin"
-    assert _tool_path("").startswith("/opt/homebrew/bin"), _tool_path("")
+    # On macOS, launchd's minimal PATH must still find Homebrew tools. On Linux
+    # the extra prefixes simply don't exist, which shutil.which tolerates.
+    assert _tool_path("/usr/bin:/bin", posix=True) == \
+        "/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin"
+    assert _tool_path("", posix=True).startswith("/opt/homebrew/bin")
+    # Windows separates PATH with ";" and has no Homebrew — leave it untouched.
+    assert _tool_path(r"C:\Windows;C:\rclone", posix=False) == r"C:\Windows;C:\rclone"
     print("self-test OK")
 
 
 if __name__ == "__main__":
+    # Course names carry accents ("Minería de Datos"). A scheduler redirects
+    # stdout to a log file, and a redirected stream uses the locale encoding —
+    # cp1252 on a Spanish Windows — so printing a course name would crash the
+    # run with UnicodeEncodeError. Force UTF-8; a no-op everywhere else.
+    for _stream in (sys.stdout, sys.stderr):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--discover", action="store_true", help="list + resolve only")
     ap.add_argument("--login", action="store_true", help="force cookie auto-login now")
