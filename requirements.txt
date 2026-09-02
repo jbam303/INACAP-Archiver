@@ -1,0 +1,6 @@
+# pip install -r requirements.txt
+requests        # descargas HTTP
+playwright      # inicio de sesión automático (navegador headless)
+
+# Después de instalar, si no tienes Google Chrome:
+#   python3 -m playwright install chromium

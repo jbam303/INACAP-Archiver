@@ -4,7 +4,9 @@ cookies*.txt
 *.curlrc
 .env
 .env.*
-!.env.example  # the placeholder template is safe to publish
+# ...but the placeholder template is safe to publish. NOTE: a trailing '#'
+# is NOT a comment in .gitignore, it becomes part of the pattern.
+!.env.example
 
 # Downloaded course content + local run state
 archive/

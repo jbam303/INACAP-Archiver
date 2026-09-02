@@ -69,9 +69,9 @@ El flujo completo:
 
 - **macOS, Linux o Windows** — cada uno con su programador de tareas
   (`launchd`, `systemd` o el Programador de tareas; ver más abajo)
-- **Python 3.11 o superior**
-- `pip install requests playwright` — `requests` para las descargas, `playwright`
-  para el inicio de sesión automático
+- **Python 3.9 o superior** (el que traen macOS, Ubuntu y Windows sirve tal cual)
+- Dos dependencias, en `requirements.txt`: `requests` para las descargas y
+  `playwright` para el inicio de sesión automático
 - **Opcional**: [`rclone`](https://rclone.org) para el respaldo en Drive
   (`brew install rclone`, `apt install rclone` o `winget install Rclone.Rclone`)
 
@@ -82,13 +82,15 @@ El flujo completo:
 ```bash
 git clone https://github.com/jbam303/INACAP-Archiver.git
 cd INACAP-Archiver
-python3 -m pip install requests playwright
+python3 -m pip install -r requirements.txt
 python3 -m playwright install chromium
+cp .env.example .env        # luego edítalo con tus credenciales
 ```
 
-El último paso solo hace falta si no tienes Google Chrome instalado: el inicio
-de sesión automático lo usa si está disponible y, si no, recurre al Chromium
-que trae Playwright.
+No te saltes el último paso aunque tengas Google Chrome. El inicio de sesión
+automático usa Chrome si puede, pero al ejecutarse desde el programador de
+tareas no siempre logra abrirlo, y ahí recurre al Chromium de Playwright. Sin
+ese respaldo, la ejecución diaria puede quedarse sin poder renovar la sesión.
 
 Luego configura el acceso (más abajo) y estará listo para ejecutarse.
 
@@ -96,9 +98,40 @@ Luego configura el acceso (más abajo) y estará listo para ejecutarse.
 
 ## ⚙️ Configuración
 
-### 1. La cookie de sesión (lo mínimo para empezar)
+### 1. Tus credenciales (es todo lo que necesitas)
 
-El archivador necesita tu sesión de Moodle. La forma más simple de obtenerla:
+Crea un archivo `.env` (incluido en el `.gitignore`, nunca se sube) con tus
+credenciales de INACAP:
+
+```
+INACAP_USER=tu-correo@inacapmail.cl     # o tu RUT: 12345678-k
+INACAP_PASS=tu-contraseña
+```
+
+Listo. En la primera ejecución el archivador inicia sesión solo, guarda la
+cookie en `aai.curlrc` y sigue trabajando:
+
+```bash
+python3 archiver.py
+```
+
+Cuando la sesión caduque, vuelve a iniciarla por su cuenta. No hay que hacer
+nada más. Si quieres comprobar solo el inicio de sesión, sin descargar:
+
+```bash
+python3 archiver.py --login     # debe responder "Sesión iniciada"
+```
+
+La contraseña se envía **únicamente** al formulario de INACAP y nunca sale de tu
+equipo.
+
+> 🔒 Nota: guardar la contraseña en un archivo local es cómodo, pero queda en
+> texto plano. En tu equipo y tu cuenta, el riesgo es bajo. Si esto se usara de
+> forma masiva, este es el punto que habría que replantear.
+
+### 2. La cookie a mano (alternativa, si prefieres no guardar tu contraseña)
+
+El archivador funciona igual si le entregas la sesión tú mismo, sin `.env`:
 
 1. Inicia sesión en `https://aai.inacap.cl` en tu navegador.
 2. Abre las herramientas de desarrollo → pestaña **Network** → recarga → clic
@@ -112,34 +145,9 @@ user-agent = "Mozilla/5.0 ..."
 cookie = "MoodleSession=xxxx; MDL_SSP_SessID=yyyy; ..."
 ```
 
-Ese archivo está en el `.gitignore`, por lo que nunca se sube. Cuando la sesión
-expira, el archivador te avisa; o mejor, activa el inicio de sesión automático
-(siguiente paso).
-
-### 2. Inicio de sesión automático
-
-Para que renueve la sesión por sí solo, crea un archivo `.env` (también incluido
-en el `.gitignore`) con tus credenciales de INACAP:
-
-```
-INACAP_USER=tu-correo@inacapmail.cl     # o tu RUT: 12345678-k
-INACAP_PASS=tu-contraseña
-```
-
-Pruébalo:
-
-```bash
-python3 archiver.py --login    # inicia sesión en el formulario real y guarda la cookie
-```
-
-Si muestra **"Login OK"**, quedó configurado. A partir de entonces, cada vez que
-la sesión caduque, el archivador inicia sesión de nuevo automáticamente. La
-contraseña se envía **únicamente** al formulario de INACAP y nunca sale de tu
-equipo.
-
-> 🔒 Nota: guardar la contraseña en un archivo local es cómodo, pero queda en
-> texto plano. En tu equipo y tu cuenta, el riesgo es bajo. Si esto se usara de
-> forma masiva, este es el punto que habría que replantear.
+Ese archivo también está en el `.gitignore`. La diferencia es que las sesiones
+de Moodle caducan: sin credenciales en `.env` tendrás que repetir estos pasos
+cada vez que eso ocurra.
 
 ### 3. Google Drive (opcional)
 
@@ -156,14 +164,14 @@ Cuando pregunte por el **scope**, elige `drive.file`. Así rclone **solo puede
 ver y modificar los archivos que él mismo sube**; no tiene acceso al resto de tu
 Drive. Aunque algo fallara, no podría borrar otros archivos.
 
-Después, en `archiver.py`, activa el respaldo:
+Después activa el respaldo en tu `.env`:
 
-```python
-DRIVE_REMOTE = "gdrive:INACAP"    # sube a una carpeta "INACAP" en tu Drive
+```
+DRIVE_REMOTE=gdrive:INACAP     # sube a una carpeta "INACAP" en tu Drive
 ```
 
 Usa `rclone copy`, no `sync`: **solo agrega y actualiza, nunca borra nada** en tu
-Drive. Déjalo en `""` para mantenerlo desactivado.
+Drive. Déjalo vacío para mantenerlo desactivado, que es como viene.
 
 ### 4. Bot de Telegram (opcional)
 
@@ -172,15 +180,28 @@ material nuevo, y pedir una descarga a mano desde el celular.
 
 1. Habla con [@BotFather](https://t.me/BotFather) en Telegram, envía
    `/newbot` y guarda el token que te entrega.
-2. Escríbele algo a tu bot recién creado y abre
-   `https://api.telegram.org/bot<TOKEN>/getUpdates` en el navegador: ahí aparece
-   el `chat.id` de tu conversación.
-3. Agrega ambos valores al `.env`:
+2. Agrega el token al `.env` y escríbele cualquier cosa a tu bot en Telegram.
+3. Pide el `chat_id` al propio archivador:
+
+```bash
+python3 archiver.py --telegram-setup
+```
+
+   Responde con la línea lista para pegar:
+
+```
+  TELEGRAM_CHAT_ID=12345678       # Tu Nombre
+```
+
+4. El `.env` queda así:
 
 ```
 TELEGRAM_TOKEN=123456:ABC-DEF...
 TELEGRAM_CHAT_ID=12345678
 ```
+
+> Si el bot ya está corriendo como servicio, deténlo antes de pedir el
+> `chat_id`: es él quien está recibiendo los mensajes.
 
 Sin estas variables, todo el bloque de Telegram queda desactivado y el
 archivador funciona igual que antes.
@@ -206,6 +227,8 @@ python3 archiver.py --login        # fuerza el inicio de sesión automático
 python3 archiver.py --bot          # atiende los comandos de Telegram
 python3 archiver.py --self-test    # verificaciones internas, sin conexión
 python3 archiver.py --retry-unsupported   # reintenta lo marcado como no soportado
+python3 archiver.py --install-schedule    # programa la ejecución diaria de las 08:00
+python3 archiver.py --telegram-setup      # muestra el chat id para el .env
 ```
 
 Para volver a descargar un recurso, elimina su entrada del `manifest.json`.
@@ -214,10 +237,26 @@ Para volver a descargar un recurso, elimina su entrada del `manifest.json`.
 
 ## ⏰ Ejecución automática diaria
 
-El script resuelve sus rutas a partir de su propia ubicación, así que no depende
-del directorio de trabajo: basta con invocarlo por ruta absoluta.
+Un solo comando, en cualquiera de los tres sistemas:
 
-### macOS (launchd)
+```bash
+python3 archiver.py --install-schedule
+```
+
+Detecta tu sistema, escribe la configuración con las rutas absolutas ya
+resueltas (tu intérprete de Python y este archivo) y la activa. Si lo ejecutas
+de nuevo, reemplaza la anterior sin quejarse.
+
+Debería responder algo así:
+
+```
+Programado todos los días a las 08:00 -> /Users/tu-usuario/Library/LaunchAgents/com.inacap.archiver.plist
+```
+
+El resto de esta sección explica qué hace ese comando en cada sistema, por si
+prefieres instalarlo a mano o revisar lo que quedó.
+
+### macOS (launchd), a mano
 
 Edita las rutas en `com.inacap.archiver.plist` (launchd no expande `~`, así que
 necesita rutas absolutas: la de tu Python y la de esta carpeta). Luego:

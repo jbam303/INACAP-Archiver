@@ -3,9 +3,9 @@
 
 Discovers the Digital Resources ("Recursos Digitales") listed in the user's
 Moodle courses, then downloads new ones (text + media + attached PDFs) into a
-local tree. Pure HTTP, no browser. Designed to run unattended on a daily
-schedule; the only manual chore is refreshing the Moodle session cookie in
-aai.curlrc when it expires.
+local tree. Pure HTTP for the downloads; a headless browser is used only to log
+in. Designed to run unattended on a daily schedule: with INACAP_USER/INACAP_PASS
+in .env it obtains and renews the Moodle session by itself, with no manual step.
 
 Auth map (verified):
   - Discovery lives on Moodle (aai.inacap.cl), behind an SSO session cookie
@@ -19,6 +19,7 @@ Auth map (verified):
 Usage:
   python3 archiver.py --discover      # list resources, resolve URLs, no download
   python3 archiver.py                  # discover + download new resources
+  python3 archiver.py --install-schedule  # register the daily 08:00 run
   python3 archiver.py --bot            # serve Telegram commands (long-poll)
   python3 archiver.py --self-test      # run offline parser checks
 """
@@ -54,10 +55,11 @@ REPO_HOST = "virtual.inacap.cl"
 # in practice. Raise it to keep everything.
 MAX_ASSET_MB = 50
 
-# Optional Google Drive sync. Set to an rclone remote:path (e.g.
-# "gdrive:INACAP") after running `rclone config` once; empty disables it.
-# See the README. rclone handles OAuth, token refresh and incremental upload.
-DRIVE_REMOTE = "gdrive:INACAP"
+# Optional Google Drive sync, configured per-install in .env as
+#   DRIVE_REMOTE=gdrive:INACAP
+# after running `rclone config` once; empty (the default) disables it. It lives
+# in .env, not here, so a fresh clone never syncs to whoever published the repo.
+# rclone handles OAuth, token refresh and incremental upload. See the README.
 
 
 def _oversize(head, url: str) -> bool:
@@ -113,13 +115,18 @@ def repo_parts(url: str) -> tuple[str, str, str] | None:
 
 
 def load_cookie(curlrc: str) -> str:
-    """Read the `cookie = "..."` line from a gitignored curlrc file."""
+    """Read the `cookie = "..."` line from a gitignored curlrc file.
+
+    Raises SessionExpired rather than exiting: on a fresh install this file does
+    not exist yet, and the auto-login is what creates it. Killing the process
+    here would send a new user to DevTools for a cookie the tool can fetch itself.
+    """
     path = ROOT / curlrc
     if not path.exists():
-        sys.exit(f"Missing {curlrc} — export the session cookie into it (see README).")
+        raise SessionExpired(f"{curlrc} todavía no existe")
     m = re.search(r'cookie\s*=\s*"(.*)"', path.read_text(encoding="utf-8"))
     if not m:
-        sys.exit(f"No cookie line found in {curlrc}.")
+        raise SessionExpired(f"{curlrc} no tiene una línea cookie = \"...\"")
     return m.group(1)
 
 
@@ -165,11 +172,25 @@ def single_run():
 
 
 def make_session():
+    """A session carrying the Moodle cookie, fetching one on a fresh install."""
     import requests
+
+    try:
+        cookie = load_cookie("aai.curlrc")
+    except SessionExpired:
+        # No usable cookie yet. refresh_cookie() writes one from the credentials
+        # in .env, so try that before sending anyone to hunt through DevTools.
+        if not refresh_cookie():
+            sys.exit(
+                "Todavía no hay sesión de Moodle. Configura INACAP_USER/INACAP_PASS "
+                "en el .env (recomendado), o exporta la cookie a aai.curlrc. "
+                "Ver README."
+            )
+        cookie = load_cookie("aai.curlrc")
 
     s = requests.Session()
     s.headers["User-Agent"] = USER_AGENT
-    s.headers["Cookie"] = load_cookie("aai.curlrc")
+    s.headers["Cookie"] = cookie
     return s
 
 
@@ -204,15 +225,25 @@ def refresh_cookie() -> bool:
 
     from playwright.sync_api import sync_playwright
 
-    print("Refreshing Moodle session (auto-login) ...", flush=True)
+    print("Renovando la sesión de Moodle (inicio automático) ...", flush=True)
     with sync_playwright() as p:
         try:
             browser = p.chromium.launch(channel="chrome", headless=True)
         except Exception:
             # channel="chrome" needs Google Chrome itself, which a Linux box
-            # often lacks. Fall back to Playwright's own build
-            # (`playwright install chromium`).
-            browser = p.chromium.launch(headless=True)
+            # often lacks — and launchd/systemd may not find it even when it is
+            # installed. Fall back to Playwright's own build.
+            try:
+                browser = p.chromium.launch(headless=True)
+            except Exception as e:
+                # Both browsers are missing. Return False like any other login
+                # failure: raising here would abort the whole run with a
+                # traceback instead of the caller's own error handling.
+                print(f"El inicio automático no encontró un navegador usable "
+                      f"({e.__class__.__name__}).\n"
+                      "  Instala uno con: python3 -m playwright install chromium",
+                      flush=True)
+                return False
         page = browser.new_context(user_agent=USER_AGENT).new_page()
         page.goto(f"{MOODLE}/my/", wait_until="domcontentloaded", timeout=45000)
         page.fill("#userNameInput", user)
@@ -609,20 +640,20 @@ def _run(discover_only: bool, retry_unsupported: bool = False) -> str:
                 resources = discover(session)
             except SessionExpired:
                 raise SessionExpired(
-                    "auto-login failed — check INACAP_USER/INACAP_PASS in .env")
+                    "el inicio automático falló — revisa INACAP_USER/INACAP_PASS en el .env")
         else:
             raise SessionExpired(
-                "refresh aai.curlrc, or set INACAP_USER/INACAP_PASS in .env "
-                "for auto-login")
+                "actualiza aai.curlrc, o configura INACAP_USER/INACAP_PASS en el "
+                ".env para el inicio automático")
     manifest = load_manifest()
     new = pending(resources, manifest, retry_unsupported)
     parked = sum(1 for v in manifest.values() if "unsupported" in v)
 
-    print(f"{len(resources)} activities found, {len(new)} new"
-          + (f", {parked} parked (unsupported)." if parked else "."))
+    print(f"{len(resources)} actividades encontradas, {len(new)} nuevas"
+          + (f", {parked} en espera (formato no soportado)." if parked else "."))
     for r in new:
         loc = str(dest_for(r).relative_to(ARCHIVE))
-        print(f"  [new] ({r['kind']}) {r['name']}  ->  {loc}")
+        print(f"  [nueva] ({r['kind']}) {r['name']}  ->  {loc}")
 
     if discover_only:
         return ""
@@ -630,10 +661,10 @@ def _run(discover_only: bool, retry_unsupported: bool = False) -> str:
     saved = []
     for r in new:
         dest = dest_for(r)
-        print(f"Downloading: {r['name']} ...", flush=True)
+        print(f"Descargando: {r['name']} ...", flush=True)
         result = download(session, r, dest)
         if "skipped" in result:
-            print(f"  parked: {result['skipped']}")
+            print(f"  en espera: {result['skipped']}")
             # Recorded, not downloaded: keeps it out of tomorrow's "new" list while
             # leaving a retryable breadcrumb for whoever writes the parser.
             manifest[r["id"]] = {
@@ -658,12 +689,12 @@ def _run(discover_only: bool, retry_unsupported: bool = False) -> str:
         save_manifest(manifest)  # persist after each, so a crash loses at most one
         saved.append(manifest[r["id"]])
         if "chars" in result:
-            note = f"  saved {result['chars']} chars, {len(result['media'])} media files"
+            note = f"  guardado: {result['chars']} caracteres, {len(result['media'])} multimedia"
             if result.get("oversize"):
-                note += f" ({len(result['oversize'])} oversize skipped)"
+                note += f" ({len(result['oversize'])} omitidos por tamaño)"
             print(note)
         else:
-            print(f"  saved {len(result['files'])} file(s)")
+            print(f"  guardados {len(result['files'])} archivo(s)")
 
     sync_to_drive()
     return summarize(saved)
@@ -685,6 +716,11 @@ def _tool_path(env_path: str, posix: bool = os.name != "nt") -> str:
     return ":".join(p for p in (env_path, "/opt/homebrew/bin", "/usr/local/bin") if p)
 
 
+def _drive_remote(env: dict) -> str:
+    """The rclone remote:path for the Drive backup; empty means disabled."""
+    return env.get("DRIVE_REMOTE", "").strip()
+
+
 def sync_to_drive() -> None:
     """Mirror the archive to Google Drive via rclone, if configured.
 
@@ -692,22 +728,137 @@ def sync_to_drive() -> None:
     upload — no reason to hand-roll the Drive API. `copy` (not `sync`) never
     deletes anything on Drive, matching this tool's append-only archive.
     """
-    if not DRIVE_REMOTE:
+    remote = _drive_remote(_load_env())
+    if not remote:
         return
     import shutil
     import subprocess
 
     rclone = shutil.which("rclone", path=_tool_path(os.environ.get("PATH", "")))
     if not rclone:
-        print("Drive sync skipped: rclone not installed (see README).")
+        print("Respaldo a Drive omitido: rclone no está instalado (ver README).")
         return
     if not ARCHIVE.exists():
         return
-    print(f"Syncing to Drive ({DRIVE_REMOTE}) ...", flush=True)
+    print(f"Respaldando en Drive ({remote}) ...", flush=True)
     rc = subprocess.run(
-        [rclone, "copy", str(ARCHIVE), DRIVE_REMOTE, "--fast-list"]
+        [rclone, "copy", str(ARCHIVE), remote, "--fast-list"]
     ).returncode
-    print("  Drive sync done." if rc == 0 else f"  Drive sync failed (rclone exit {rc}).")
+    print("  Respaldo completado." if rc == 0 else f"  El respaldo falló (rclone salió con {rc}).")
+
+
+# --- Daily schedule ---------------------------------------------------------
+# Installing the daily run means writing absolute paths into a launchd plist, a
+# systemd unit or a schtasks command. That hand-editing is the step people get
+# wrong, so `--install-schedule` renders it from the running interpreter and
+# this file's own location. The renderers below are pure so they can be tested
+# without touching the machine; install_schedule() is the thin shell that runs.
+
+SCHEDULE_LABEL = "com.inacap.archiver"
+SCHEDULE_HOUR = 8
+
+
+def _schedule_plist(python: str, script: str) -> str:
+    """A launchd agent that runs the archiver daily at SCHEDULE_HOUR."""
+    log = str(ROOT / "archiver.log")
+    e = html.escape  # a path may hold &, < or > — unescaped they break the XML
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>{e(SCHEDULE_LABEL)}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{e(python)}</string>
+    <string>{e(script)}</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>{SCHEDULE_HOUR}</integer>
+    <key>Minute</key><integer>0</integer>
+  </dict>
+  <key>StandardOutPath</key><string>{e(log)}</string>
+  <key>StandardErrorPath</key><string>{e(log)}</string>
+</dict>
+</plist>
+"""
+
+
+def _schedule_systemd(python: str, script: str) -> tuple[str, str]:
+    """(service, timer) units for a daily user-level run."""
+    log = str(ROOT / "archiver.log")
+    service = f"""[Unit]
+Description=Archivador INACAP
+
+[Service]
+Type=oneshot
+ExecStart={python} {script}
+StandardOutput=append:{log}
+StandardError=append:{log}
+"""
+    timer = f"""[Unit]
+Description=Archivador INACAP, todos los dias a las 0{SCHEDULE_HOUR}:00
+
+[Timer]
+OnCalendar=*-*-* 0{SCHEDULE_HOUR}:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+"""
+    return service, timer
+
+
+def _schedule_schtasks(python: str, script: str) -> list[str]:
+    """The schtasks argv that registers the daily task.
+
+    /tr takes the whole command as one string, so both paths are quoted inside
+    it; /f overwrites an existing task so re-running the installer is safe.
+    """
+    return [
+        "schtasks", "/create", "/f",
+        "/tn", SCHEDULE_LABEL,
+        "/sc", "daily",
+        "/st", f"0{SCHEDULE_HOUR}:00",
+        "/tr", f'"{python}" "{script}"',
+    ]
+
+
+def install_schedule() -> None:
+    """Register the daily run with whatever scheduler this OS provides."""
+    import subprocess
+
+    python = sys.executable
+    script = str(pathlib.Path(__file__).resolve())
+
+    if sys.platform == "darwin":
+        target = pathlib.Path.home() / "Library/LaunchAgents" / f"{SCHEDULE_LABEL}.plist"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(_schedule_plist(python, script), encoding="utf-8")
+        # Unload first so re-running replaces the agent instead of erroring.
+        subprocess.run(["launchctl", "unload", str(target)],
+                       capture_output=True)
+        rc = subprocess.run(["launchctl", "load", str(target)]).returncode
+    elif sys.platform == "win32":
+        rc = subprocess.run(_schedule_schtasks(python, script)).returncode
+        target = SCHEDULE_LABEL
+    else:
+        unit_dir = pathlib.Path.home() / ".config/systemd/user"
+        unit_dir.mkdir(parents=True, exist_ok=True)
+        service, timer = _schedule_systemd(python, script)
+        (unit_dir / "inacap-archiver.service").write_text(service, encoding="utf-8")
+        (unit_dir / "inacap-archiver.timer").write_text(timer, encoding="utf-8")
+        subprocess.run(["systemctl", "--user", "daemon-reload"])
+        rc = subprocess.run(
+            ["systemctl", "--user", "enable", "--now", "inacap-archiver.timer"]
+        ).returncode
+        target = str(unit_dir / "inacap-archiver.timer")
+
+    if rc == 0:
+        print(f"Programado todos los días a las 0{SCHEDULE_HOUR}:00 -> {target}")
+    else:
+        sys.exit(f"No se pudo programar la ejecución (salida {rc}). Ver README.")
 
 
 # --- Telegram ---------------------------------------------------------------
@@ -749,7 +900,57 @@ def notify(text: str, chat_id: str | None = None) -> None:
             timeout=30,
         )
     except Exception as e:  # a failed notification must never sink a run
-        print(f"Telegram notify failed: {e}")
+        print(f"No se pudo avisar por Telegram: {e}")
+
+
+def _chat_ids(payload: dict) -> list[tuple[str, str]]:
+    """(chat_id, display name) for every chat seen in a getUpdates payload.
+
+    An update wraps its chat under one of several keys (message, edited_message,
+    channel_post...), so we take the chat off whichever one carries it. Ordered
+    by first appearance and deduped, because the same person usually shows up in
+    several updates.
+    """
+    out: dict[str, str] = {}
+    for update in payload.get("result", []):
+        for value in update.values():
+            chat = value.get("chat") if isinstance(value, dict) else None
+            if not chat or "id" not in chat:
+                continue
+            name = " ".join(
+                p for p in (chat.get("first_name"), chat.get("last_name")) if p
+            ) or chat.get("username") or chat.get("title") or "sin nombre"
+            out.setdefault(str(chat["id"]), name)
+    return list(out.items())
+
+
+def telegram_setup() -> None:
+    """Print the chat id to paste into .env, read from the bot's own updates."""
+    import requests
+
+    token = _load_env().get("TELEGRAM_TOKEN")
+    if not token:
+        sys.exit("Falta TELEGRAM_TOKEN en el .env. Pídeselo a @BotFather.")
+    r = requests.get(_API.format(token=token, method="getUpdates"), timeout=30)
+    payload = r.json()
+    if not payload.get("ok"):
+        sys.exit(f"Telegram rechazó la consulta: {payload.get('description')}")
+
+    chats = _chat_ids(payload)
+    if not chats:
+        # A running --bot consumes updates and advances the offset, so this
+        # command sees nothing while that service is up.
+        sys.exit(
+            "Ningún mensaje todavía. Escríbele algo a tu bot en Telegram y "
+            "vuelve a ejecutar este comando.\n"
+            "Si el bot ya está corriendo como servicio, deténlo primero: es él "
+            "quien está recibiendo los mensajes."
+        )
+    print("Agrega esta línea a tu .env:\n")
+    for chat_id, name in chats:
+        print(f"  TELEGRAM_CHAT_ID={chat_id}       # {name}")
+    if len(chats) > 1:
+        print("\nHay más de una conversación; usa la tuya.")
 
 
 def parse_command(update: dict) -> tuple[str, str]:
@@ -790,12 +991,12 @@ def bot() -> None:
     """
     conf = _telegram_conf()
     if not conf:
-        sys.exit("Set TELEGRAM_TOKEN and TELEGRAM_CHAT_ID in .env (see README).")
+        sys.exit("Configura TELEGRAM_TOKEN y TELEGRAM_CHAT_ID en el .env (ver README).")
     import requests
 
     token, owner = conf
     offset = 0
-    print("Bot listening (ctrl-C to stop).", flush=True)
+    print("Bot escuchando (ctrl-C para detener).", flush=True)
     notify("Bot INACAP en línea. Comandos: /bajar  /estado")
     while True:
         try:
@@ -808,10 +1009,10 @@ def bot() -> None:
             if not payload.get("ok"):
                 # A revoked or mistyped token fails every poll; retrying is
                 # pointless and silent. Die loudly so the log says why.
-                sys.exit(f"Telegram rejected the poll: {payload.get('description')}")
+                sys.exit(f"Telegram rechazó la consulta: {payload.get('description')}")
             updates = payload["result"]
         except Exception as e:
-            print(f"poll failed: {e}", flush=True)
+            print(f"consulta fallida: {e}", flush=True)
             time.sleep(15)  # network hiccup or Telegram blip; back off and retry
             continue
         for update in updates:
@@ -820,7 +1021,7 @@ def bot() -> None:
             # Anyone can message a bot: only the owner's chat is ever served.
             if not cmd or chat != owner:
                 continue
-            print(f"command: {cmd}", flush=True)
+            print(f"comando: {cmd}", flush=True)
             if cmd == "/bajar":
                 notify("Buscando novedades…", chat)
             notify(handle(cmd), chat)
@@ -896,6 +1097,17 @@ def self_test() -> None:
     assert _fix_mojibake("Caso PrÃ¡ctico") == "Caso Práctico", _fix_mojibake("Caso PrÃ¡ctico")
     assert _fix_mojibake("Big Data.pdf") == "Big Data.pdf"  # untouched when clean
 
+    # A missing or unusable cookie file must not kill the process: on a fresh
+    # install the auto-login is what creates it, and it gets first refusal.
+    # .gitignore has no `cookie = "..."` line; the README does, in an example.
+    for bad in ("no-such-file.curlrc", ".gitignore"):  # absent, then no cookie line
+        try:
+            load_cookie(bad)
+        except SessionExpired:
+            pass
+        else:
+            raise AssertionError(f"load_cookie({bad!r}) must raise, not exit")
+
     # A parked (unsupported) activity must stop counting as new, or the daily log
     # cries wolf forever — but --retry-unsupported must still pick it back up.
     res = [{"id": "1"}, {"id": "2"}, {"id": "3"}]
@@ -904,6 +1116,31 @@ def self_test() -> None:
     assert [r["id"] for r in pending(res, man, retry_unsupported=True)] == ["1", "3"]
     assert pending(res, {}) == res, "an empty manifest leaves everything pending"
 
+    # Drive backup is opt-in and configured in .env, so a fresh clone never
+    # tries to sync to somebody else's remote. .env values arrive unstripped.
+    assert _drive_remote({}) == "", "Drive must be off unless configured"
+    assert _drive_remote({"DRIVE_REMOTE": ""}) == ""
+    assert _drive_remote({"DRIVE_REMOTE": " gdrive:INACAP "}) == "gdrive:INACAP"
+
+    # The scheduler recipes are rendered from absolute paths the caller resolves.
+    # Getting those paths right by hand is the step that trips people up, so the
+    # rendering is what gets tested; installing them is a thin shell around it.
+    plist = _schedule_plist("/usr/bin/python3", "/home/a b/archiver.py")
+    assert "<string>/usr/bin/python3</string>" in plist, plist
+    assert "<string>/home/a b/archiver.py</string>" in plist, plist
+    assert "<key>Hour</key><integer>8</integer>" in plist, plist
+    # A path may contain XML metacharacters; unescaped they corrupt the plist.
+    assert "R&amp;D" in _schedule_plist("/p", "/R&D/archiver.py")
+
+    service, timer = _schedule_systemd("/usr/bin/python3", "/opt/a/archiver.py")
+    assert "ExecStart=/usr/bin/python3 /opt/a/archiver.py" in service, service
+    assert "OnCalendar=*-*-* 08:00:00" in timer, timer
+    assert "Persistent=true" in timer, timer  # catches up after the PC was off
+
+    argv = _schedule_schtasks("C:\\Py\\pythonw.exe", "C:\\a b\\archiver.py")
+    assert "/f" in argv, argv  # re-running the installer must not fail
+    assert '"C:\\Py\\pythonw.exe" "C:\\a b\\archiver.py"' in argv, argv
+
     assert summarize([]) == "", "nothing new must produce no message"
     msg = summarize([
         {"course": "Minería de Datos", "name": "Recurso digital: Clustering"},
@@ -911,6 +1148,17 @@ def self_test() -> None:
     ])
     assert msg.startswith("INACAP: 2 recurso(s) nuevo(s)"), msg
     assert "• [Big Data] Clase 3" in msg, msg
+
+    # --telegram-setup reads the chat id off getUpdates so nobody has to open the
+    # raw API in a browser and hunt for a number in the JSON.
+    payload = {"result": [
+        {"message": {"chat": {"id": 111, "first_name": "Ana", "last_name": "Soto"}}},
+        {"message": {"chat": {"id": 111, "first_name": "Ana"}}},          # deduped
+        {"edited_message": {"chat": {"id": 222, "username": "pedro"}}},   # also counts
+        {"my_chat_member": {}},                                           # no chat, ignored
+    ]}
+    assert _chat_ids(payload) == [("111", "Ana Soto"), ("222", "pedro")], _chat_ids(payload)
+    assert _chat_ids({"result": []}) == []
 
     upd = {"update_id": 7, "message": {"chat": {"id": 12345}, "text": "/Bajar@mibot ya"}}
     assert parse_command(upd) == ("/bajar", "12345"), parse_command(upd)
@@ -924,7 +1172,7 @@ def self_test() -> None:
     assert _tool_path("", posix=True).startswith("/opt/homebrew/bin")
     # Windows separates PATH with ";" and has no Homebrew — leave it untouched.
     assert _tool_path(r"C:\Windows;C:\rclone", posix=False) == r"C:\Windows;C:\rclone"
-    print("self-test OK")
+    print("Verificaciones OK")
 
 
 if __name__ == "__main__":
@@ -935,19 +1183,28 @@ if __name__ == "__main__":
     for _stream in (sys.stdout, sys.stderr):
         _stream.reconfigure(encoding="utf-8", errors="replace")
 
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--discover", action="store_true", help="list + resolve only")
-    ap.add_argument("--login", action="store_true", help="force cookie auto-login now")
+    ap = argparse.ArgumentParser(
+        description="Archivador del campus virtual de INACAP.")
+    ap.add_argument("--discover", action="store_true", help="solo lista y resuelve, sin descargar")
+    ap.add_argument("--login", action="store_true", help="fuerza ahora el inicio de sesión automático")
     ap.add_argument("--retry-unsupported", action="store_true",
-                    help="re-attempt activities parked as unsupported")
-    ap.add_argument("--bot", action="store_true", help="serve Telegram commands")
-    ap.add_argument("--self-test", action="store_true", help="offline parser checks")
+                    help="reintenta las actividades en espera por formato no soportado")
+    ap.add_argument("--install-schedule", action="store_true",
+                    help="programa la ejecución diaria en este sistema")
+    ap.add_argument("--telegram-setup", action="store_true",
+                    help="muestra el chat id para poner en el .env")
+    ap.add_argument("--bot", action="store_true", help="atiende los comandos de Telegram")
+    ap.add_argument("--self-test", action="store_true", help="verificaciones internas, sin conexión")
     args = ap.parse_args()
     if args.self_test:
         self_test()
     elif args.login:
-        print("Login OK, cookie saved." if refresh_cookie()
-              else "Login failed — check INACAP_USER/INACAP_PASS in .env.")
+        print("Sesión iniciada, cookie guardada." if refresh_cookie()
+              else "No se pudo iniciar sesión — revisa INACAP_USER/INACAP_PASS en el .env.")
+    elif args.install_schedule:
+        install_schedule()
+    elif args.telegram_setup:
+        telegram_setup()
     elif args.bot:
         bot()
     else:
@@ -955,7 +1212,7 @@ if __name__ == "__main__":
             notify(run(discover_only=args.discover,
                        retry_unsupported=args.retry_unsupported))  # silent when nothing is new
         except Busy:
-            sys.exit("Another run is in progress.")
+            sys.exit("Ya hay otra ejecución en curso.")
         except SessionExpired as e:
-            notify(f"INACAP: la corrida diaria falló. Sesión de Moodle: {e}")
-            sys.exit(f"Moodle session expired — {e}.")
+            notify(f"INACAP: la ejecución diaria falló. Sesión de Moodle: {e}")
+            sys.exit(f"La sesión de Moodle expiró — {e}.")
