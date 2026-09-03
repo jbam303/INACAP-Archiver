@@ -537,5 +537,7 @@ La idea es que le sirva a más estudiantes.
 
 ## 📄 Licencia
 
-Elige la que prefieras al publicarlo (MIT es lo habitual para un proyecto así).
+[MIT](LICENSE). Puedes usarlo, modificarlo y compartirlo; solo conserva el aviso
+de copyright. Se entrega sin garantía.
+
 Úsalo bajo tu propia responsabilidad: es tu cuenta y tu material.

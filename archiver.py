@@ -1441,7 +1441,8 @@ _MUST_IGNORE = (".env", "cookies.txt", "aai.curlrc", "virtual.curlrc",
                 "archiver.log", "bot.log",
                 "archive/Ramo/apunte.pdf", ".atl/skill-registry.md",
                 ".DS_Store", "__pycache__/archiver.cpython-311.pyc", ".lock")
-_MUST_KEEP = (".env.example", "archiver.py", "README.md", "requirements.txt")
+_MUST_KEEP = (".env.example", "archiver.py", "notebooklm_sync.py",
+              "README.md", "requirements.txt", "LICENSE")
 
 
 def _gitignore_test() -> None:
