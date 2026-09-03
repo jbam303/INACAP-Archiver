@@ -1172,7 +1172,39 @@ def self_test() -> None:
     assert _tool_path("", posix=True).startswith("/opt/homebrew/bin")
     # Windows separates PATH with ";" and has no Homebrew — leave it untouched.
     assert _tool_path(r"C:\Windows;C:\rclone", posix=False) == r"C:\Windows;C:\rclone"
+    _gitignore_test()
     print("Verificaciones OK")
+
+
+# Paths git must keep out of the repository, and the one placeholder that must
+# stay in. This is not a parser check like the rest: it asks git itself, because
+# .gitignore has its own syntax and a plausible-looking rule can silently fail.
+# A trailing "# comment" on a pattern line is NOT a comment — it becomes part of
+# the pattern — which is exactly how !.env.example once stopped working.
+_MUST_IGNORE = (".env", "cookies.txt", "aai.curlrc", "virtual.curlrc",
+                "manifest.json", "notebooklm.json", "archiver.log", "bot.log",
+                "archive", ".atl", ".DS_Store", "__pycache__", ".lock")
+_MUST_KEEP = (".env.example", "archiver.py", "README.md", "requirements.txt")
+
+
+def _gitignore_test() -> None:
+    import subprocess
+
+    def ignored(path: str) -> bool:
+        # --no-index is essential: without it check-ignore skips paths already
+        # in the index, so a tracked file always looks "not ignored" and the
+        # check silently passes no matter what the rules say.
+        return subprocess.run(["git", "check-ignore", "-q", "--no-index", path],
+                              cwd=ROOT, capture_output=True).returncode == 0
+
+    if subprocess.run(["git", "rev-parse", "--git-dir"], cwd=ROOT,
+                      capture_output=True).returncode != 0:
+        return  # not a clone (a downloaded zip, say) — nothing to check
+
+    for path in _MUST_IGNORE:
+        assert ignored(path), f".gitignore dejaría entrar {path} al repositorio"
+    for path in _MUST_KEEP:
+        assert not ignored(path), f".gitignore está excluyendo {path}"
 
 
 if __name__ == "__main__":

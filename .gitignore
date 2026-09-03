@@ -14,6 +14,7 @@ content/
 downloads/
 virtual.inacap.cl/
 manifest.json
+notebooklm.json
 *.log
 .lock
 

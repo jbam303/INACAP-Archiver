@@ -35,6 +35,8 @@ herramienta se encarga de eso por ti: la configuras una vez y se mantiene sola.
   tocar su propia carpeta.
 - ⏰ **Se ejecuta solo, todos los días**, con el programador de tareas del
   sistema (macOS, Linux o Windows).
+- 🧠 **Opcionalmente sube todo a NotebookLM**, un cuaderno por ramo, para poder
+  preguntarle a tus propios apuntes.
 
 ---
 
@@ -218,6 +220,49 @@ Comandos disponibles:
 
 ---
 
+### 5. NotebookLM (opcional)
+
+Sube el material archivado a [NotebookLM](https://notebooklm.google.com) para
+poder preguntarle a tus propios apuntes. Crea **un cuaderno por ramo** y sube
+solo los documentos: PDF, DOCX, PPTX y el texto de los Recursos Digitales.
+
+Las imágenes de los paquetes Rise **no** se suben. Su contenido ya viaja dentro
+del `content.md` de cada recurso; subirlas gastaría cupo y le metería ruido al
+modelo.
+
+```bash
+python3 -m pip install "notebooklm-py[browser]"
+notebooklm login          # una sola vez, con tu cuenta de Google
+python3 notebooklm_sync.py --dry-run    # qué subiría, sin subir nada
+python3 notebooklm_sync.py              # súbelo
+```
+
+Cada documento pasa por **subir → esperar el procesamiento → renombrar**. El
+paso de espera no es decorativo: `source add` termina bien apenas se acepta la
+subida, no cuando la fuente quedó lista, así que un archivo que falla al
+procesarse igual reportaría éxito. Solo se registra lo que terminó en `ready`;
+lo demás se reintenta en la siguiente ejecución.
+
+Los títulos salen del nombre que el docente le puso a la actividad en Moodle,
+tomado del `manifest.json`. Nada de `content.md` repetidos.
+
+Es **idempotente**: puedes ejecutarlo cuantas veces quieras. Lleva registro en
+`notebooklm.json` (ignorado por git) y verifica contra el cuaderno real, así que
+si borras una fuente en NotebookLM, la próxima ejecución la repone.
+
+```bash
+python3 notebooklm_sync.py --ramo "Big Data"   # un solo ramo
+```
+
+> ⚠️ `notebooklm-py` es un proyecto **no oficial** que usa endpoints internos de
+> Google, no una API pública. Puede dejar de funcionar sin aviso, y la sesión que
+> guarda es la de tu cuenta de Google. Es tu decisión usarlo.
+
+El cupo gratuito de NotebookLM es de **50 fuentes por cuaderno**, y como es por
+cuaderno y no en total, un ramo completo entra sin problema.
+
+---
+
 ## 🖥️ Uso
 
 ```bash
@@ -229,6 +274,7 @@ python3 archiver.py --self-test    # verificaciones internas, sin conexión
 python3 archiver.py --retry-unsupported   # reintenta lo marcado como no soportado
 python3 archiver.py --install-schedule    # programa la ejecución diaria de las 08:00
 python3 archiver.py --telegram-setup      # muestra el chat id para el .env
+python3 notebooklm_sync.py                # sube el material a NotebookLM
 ```
 
 Para volver a descargar un recurso, elimina su entrada del `manifest.json`.
