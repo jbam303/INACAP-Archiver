@@ -248,6 +248,14 @@ lo demás se reintenta en la siguiente ejecución.
 Los títulos salen del nombre que el docente le puso a la actividad en Moodle,
 tomado del `manifest.json`. Nada de `content.md` repetidos.
 
+También extrae las **fuentes citadas dentro del material** —documentación
+oficial, glosarios, algún paper— y las agrega como fuentes propias del mismo
+cuaderno, para poder consultarlas junto al documento que las cita.
+
+Antes de subir una referencia se comprueba que responda: el material trae
+enlaces muertos, y un cuaderno lleno de páginas de error es peor que uno sin
+referencias. Con `--sin-referencias` se sube solo el material.
+
 Es **idempotente**: puedes ejecutarlo cuantas veces quieras. Lleva registro en
 `notebooklm.json` (ignorado por git) y verifica contra el cuaderno real, así que
 si borras una fuente en NotebookLM, la próxima ejecución la repone.
@@ -278,6 +286,7 @@ python3 archiver.py --retry-unsupported   # reintenta lo marcado como no soporta
 python3 archiver.py --install-schedule    # programa la ejecución diaria de las 08:00
 python3 archiver.py --telegram-setup      # muestra el chat id para el .env
 python3 notebooklm_sync.py                # sube el material a NotebookLM
+python3 notebooklm_sync.py --sin-referencias   # solo el material, sin enlaces citados
 ```
 
 Para volver a descargar un recurso, elimina su entrada del `manifest.json`.
