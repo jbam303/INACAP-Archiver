@@ -953,6 +953,222 @@ def telegram_setup() -> None:
         print("\nHay más de una conversación; usa la tuya.")
 
 
+# --- failure reporting -------------------------------------------------------
+# An unattended job that dies quietly is worse than one that never ran: nobody
+# reads a log that has always been fine. But notifying every hiccup teaches the
+# reader to ignore the notifications, which ends in the same silence. So: report
+# what the user must act on, and report persistent trouble even when each single
+# failure looked recoverable.
+
+LAST_RUN = ROOT / ".last-run.json"
+
+# Network trouble by exception name, so requests need not be imported here.
+# Builtin ConnectionError (an OSError) counts too.
+_TRANSIENT = {"ConnectionError", "Timeout", "ConnectTimeout", "ReadTimeout",
+              "ChunkedEncodingError", "SSLError", "ProxyError", "TimeoutError"}
+
+
+def is_transient(exc: BaseException) -> bool:
+    """True when tomorrow's run may well succeed without anyone doing anything."""
+    return bool({c.__name__ for c in type(exc).__mro__} & _TRANSIENT)
+
+
+def should_notify(exc: BaseException, consecutive: int) -> bool:
+    """Whether this failure is worth a Telegram message.
+
+    Anything the user must fix is reported at once. A transient failure waits:
+    one dropped connection is noise, but two runs in a row means the archive has
+    silently stopped growing, and that is worth knowing.
+    """
+    return not is_transient(exc) or consecutive >= 2
+
+
+def previous_run() -> dict:
+    """How the last run ended. Empty on a first run."""
+    if not LAST_RUN.exists():
+        return {}
+    try:
+        return json.loads(LAST_RUN.read_text(encoding="utf-8"))
+    except ValueError:
+        return {}  # truncated by a crash mid-write; treat as no history
+
+
+def record_run(ok: bool, failures: int = 0, error: str = "",
+               notified: bool = False) -> None:
+    """Persist how this run ended. The caller owns the failure count, so that
+    reading it and writing it can never drift apart."""
+    LAST_RUN.write_text(json.dumps(
+        {"ok": ok, "consecutive_failures": 0 if ok else failures,
+         "error": error, "notified": notified,
+         "at": dt.datetime.now().isoformat(timespec="seconds")},
+        indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+# --- diagnóstico (--check) ---------------------------------------------------
+# Cuando algo no anda, un error suelto no dice en qué paso se rompió. Esto
+# recorre la instalación entera en orden de dependencia y deja ver de un vistazo
+# qué falta. Lo opcional que no está configurado NO es un fallo: es una elección.
+
+OK, WARN, FAIL, SKIP = "ok", "warn", "fail", "skip"
+_MARK = {OK: "✓", WARN: "!", FAIL: "✗", SKIP: "·"}
+MIN_PYTHON = (3, 9)
+
+
+def _mask(value: str) -> str:
+    """Deja los extremos a la vista y tapa el medio.
+
+    Alcanza para reconocer un valor propio sin publicarlo: quien pide ayuda
+    pegando esta salida no debería estar entregando su RUT ni su chat id.
+    """
+    if len(value) <= 4:
+        return "·" * len(value)
+    return f"{value[:2]}{'·' * (len(value) - 5)}{value[-3:]}"
+
+
+def check_python(info=None) -> tuple:
+    v = tuple(info or sys.version_info[:3])
+    shown = ".".join(str(n) for n in v)
+    if v >= MIN_PYTHON:
+        return OK, f"Python {shown}"
+    return FAIL, f"Python {shown} — hace falta {'.'.join(map(str, MIN_PYTHON))} o superior"
+
+
+def exit_code(results) -> int:
+    """1 solo si algo está roto. Lo no configurado y los avisos no cuentan."""
+    return 1 if any(status == FAIL for status, _ in results) else 0
+
+
+def _check_deps() -> tuple:
+    faltan = []
+    for mod in ("requests", "playwright"):
+        try:
+            __import__(mod)
+        except ImportError:
+            faltan.append(mod)
+    if faltan:
+        return FAIL, (f"falta {', '.join(faltan)} — "
+                      "python3 -m pip install -r requirements.txt")
+    return OK, "requests y playwright instalados"
+
+
+def _check_credentials() -> tuple:
+    env = _load_env()
+    if not (ROOT / ".env").exists():
+        return FAIL, "no existe .env — copia .env.example y complétalo"
+    if env.get("INACAP_USER") and env.get("INACAP_PASS"):
+        return OK, f"INACAP_USER={_mask(env['INACAP_USER'])}"
+    if (ROOT / "aai.curlrc").exists():
+        return WARN, "sin credenciales; se usa la cookie manual de aai.curlrc"
+    return FAIL, "faltan INACAP_USER e INACAP_PASS en el .env"
+
+
+def _check_moodle() -> tuple:
+    try:
+        cursos = discover_courses(make_session())
+        return OK, f"{len(cursos)} curso(s) accesibles"
+    except SystemExit as e:
+        return FAIL, str(e).splitlines()[0]
+    except SessionExpired:
+        return (OK, "la sesión estaba vencida y se renovó sola") if refresh_cookie() \
+            else (FAIL, "no se pudo iniciar sesión — revisa las credenciales")
+    except Exception as e:
+        return FAIL, f"{type(e).__name__}: {e}"
+
+
+def _check_drive() -> tuple:
+    import shutil
+
+    remote = _drive_remote(_load_env())
+    if not remote:
+        return SKIP, "desactivado (DRIVE_REMOTE vacío en el .env)"
+    if not shutil.which("rclone", path=_tool_path(os.environ.get("PATH", ""))):
+        return FAIL, f"DRIVE_REMOTE={remote} pero rclone no está instalado"
+    return OK, f"respaldo en {remote}"
+
+
+def _check_telegram() -> tuple:
+    conf = _telegram_conf()
+    if not conf:
+        return SKIP, "desactivado (sin TELEGRAM_TOKEN o TELEGRAM_CHAT_ID)"
+    import requests
+
+    try:
+        r = requests.get(_API.format(token=conf[0], method="getMe"), timeout=20)
+        data = r.json()
+        if not data.get("ok"):
+            return FAIL, f"Telegram rechazó el token: {data.get('description')}"
+        return OK, f"bot @{data['result'].get('username')}, chat {_mask(conf[1])}"
+    except Exception as e:
+        return WARN, f"no se pudo comprobar ahora: {type(e).__name__}"
+
+
+def _check_schedule() -> tuple:
+    import subprocess
+
+    if sys.platform == "darwin":
+        target = pathlib.Path.home() / "Library/LaunchAgents" / f"{SCHEDULE_LABEL}.plist"
+        listo = target.exists()
+    elif sys.platform == "win32":
+        listo = subprocess.run(["schtasks", "/query", "/tn", SCHEDULE_LABEL],
+                               capture_output=True).returncode == 0
+    else:
+        listo = (pathlib.Path.home()
+                 / ".config/systemd/user/inacap-archiver.timer").exists()
+    if listo:
+        return OK, f"programada a las 0{SCHEDULE_HOUR}:00"
+    return WARN, "sin programar — usa: python3 archiver.py --install-schedule"
+
+
+def check() -> None:
+    """Recorre la instalación y muestra qué está listo y qué falta."""
+    ultima = previous_run()
+    pasos = [
+        ("Python", check_python()),
+        ("Dependencias", _check_deps()),
+        ("Credenciales", _check_credentials()),
+        ("Sesión de Moodle", _check_moodle()),
+        ("Google Drive", _check_drive()),
+        ("Telegram", _check_telegram()),
+        ("Ejecución diaria", _check_schedule()),
+    ]
+    ancho = max(len(n) for n, _ in pasos)
+    for nombre, (status, detalle) in pasos:
+        print(f"  {_MARK[status]}  {nombre.ljust(ancho)}  {detalle}")
+
+    if ultima:
+        estado = "correcta" if ultima.get("ok") else \
+            f"fallida ({ultima.get('consecutive_failures', 0)} seguidas): {ultima.get('error', '')}"
+        print(f"\n  Última ejecución: {estado} — {ultima.get('at', '')}")
+
+    resultados = [r for _, r in pasos]
+    if exit_code(resultados):
+        sys.exit("\nHay algo roto (✗). Revisa las líneas marcadas.")
+    print("\nTodo en orden.")
+
+
+def report_failure(exc: BaseException) -> bool:
+    """Record a failed run, and speak up when it is worth speaking up.
+
+    Returns whether a notification was sent, which the next successful run reads
+    back to decide if it owes the user an all-clear.
+    """
+    fails = previous_run().get("consecutive_failures", 0) + 1
+    aviso = should_notify(exc, fails)
+    record_run(False, fails, f"{type(exc).__name__}: {exc}", aviso)
+    if aviso:
+        veces = f" ({fails} ejecuciones seguidas)" if fails > 1 else ""
+        notify(f"INACAP: la ejecución diaria falló{veces}.\n{exc}")
+    return aviso
+
+
+def report_success(summary: str) -> None:
+    """Close the loop: if the user was told about a failure, tell them it ended."""
+    if previous_run().get("notified"):
+        notify("INACAP: la ejecución diaria volvió a funcionar.")
+    record_run(True)
+    notify(summary)  # silent when nothing is new
+
+
 def parse_command(update: dict) -> tuple[str, str]:
     """(command, chat_id) from a Telegram update; ("", "") if it isn't one."""
     msg = update.get("message") or {}
@@ -1160,6 +1376,41 @@ def self_test() -> None:
     assert _chat_ids(payload) == [("111", "Ana Soto"), ("222", "pedro")], _chat_ids(payload)
     assert _chat_ids({"result": []}) == []
 
+    # --check: lo opcional sin configurar no es un fallo, es una elección. Solo
+    # lo roto hace salir con error, para que el diagnóstico sirva de verdad.
+    # La salida de --check está pensada para pegarla en un issue pidiendo ayuda,
+    # así que no puede llevar el RUT ni el chat id en claro.
+    assert _mask("22066784-7") == "22·····4-7", _mask("22066784-7")
+    assert _mask("5623909655") == "56·····655"
+    assert len(_mask("22066784-7")) == len("22066784-7"), "conserva el largo"
+    assert _mask("ab") == "··", "demasiado corto para mostrar algo"
+    assert _mask("") == ""
+
+    assert check_python((3, 11, 9))[0] == OK
+    assert check_python((3, 9, 6))[0] == OK, "3.9 es el mínimo soportado"
+    assert check_python((3, 8, 10))[0] == FAIL
+    assert exit_code([(OK, "a"), (SKIP, "b")]) == 0, "lo opcional no rompe"
+    assert exit_code([(OK, "a"), (WARN, "b")]) == 0, "un aviso tampoco"
+    assert exit_code([(OK, "a"), (FAIL, "b")]) == 1
+    assert exit_code([]) == 0
+
+    # Qué merece interrumpir a alguien. Un corte de red se arregla solo mañana;
+    # una credencial rechazada, no. Lo desconocido se avisa: es más seguro
+    # molestar por algo nuevo que tragárselo.
+    class ReadTimeout(Exception): pass          # imita a requests.exceptions
+    class SSLError(Exception): pass
+    assert is_transient(ReadTimeout()), "un timeout de red es transitorio"
+    assert is_transient(SSLError())
+    assert is_transient(ConnectionError())      # el builtin, también de red
+    assert not is_transient(SessionExpired("cookie vencida"))
+    assert not is_transient(ValueError("algo nuevo")), "lo desconocido se avisa"
+
+    # Transitorio: se calla la primera vez, avisa si insiste.
+    assert not should_notify(ReadTimeout(), 1)
+    assert should_notify(ReadTimeout(), 2), "dos días seguidos sin bajar nada sí"
+    # Accionable: avisa de entrada.
+    assert should_notify(SessionExpired("x"), 1)
+
     upd = {"update_id": 7, "message": {"chat": {"id": 12345}, "text": "/Bajar@mibot ya"}}
     assert parse_command(upd) == ("/bajar", "12345"), parse_command(upd)
     assert parse_command({"message": {"chat": {"id": 1}, "text": "hola"}}) == ("", "1")
@@ -1186,7 +1437,8 @@ def self_test() -> None:
 # git no la reconoce como tal y la comprobación pasaría en falso. Lo que importa
 # igual es que no entre lo que hay dentro.
 _MUST_IGNORE = (".env", "cookies.txt", "aai.curlrc", "virtual.curlrc",
-                "manifest.json", "notebooklm.json", "archiver.log", "bot.log",
+                "manifest.json", "notebooklm.json", ".last-run.json",
+                "archiver.log", "bot.log",
                 "archive/Ramo/apunte.pdf", ".atl/skill-registry.md",
                 ".DS_Store", "__pycache__/archiver.cpython-311.pyc", ".lock")
 _MUST_KEEP = (".env.example", "archiver.py", "README.md", "requirements.txt")
@@ -1226,6 +1478,8 @@ if __name__ == "__main__":
     ap.add_argument("--login", action="store_true", help="fuerza ahora el inicio de sesión automático")
     ap.add_argument("--retry-unsupported", action="store_true",
                     help="reintenta las actividades en espera por formato no soportado")
+    ap.add_argument("--check", action="store_true",
+                    help="revisa la instalación y muestra qué falta")
     ap.add_argument("--install-schedule", action="store_true",
                     help="programa la ejecución diaria en este sistema")
     ap.add_argument("--telegram-setup", action="store_true",
@@ -1238,6 +1492,8 @@ if __name__ == "__main__":
     elif args.login:
         print("Sesión iniciada, cookie guardada." if refresh_cookie()
               else "No se pudo iniciar sesión — revisa INACAP_USER/INACAP_PASS en el .env.")
+    elif args.check:
+        check()
     elif args.install_schedule:
         install_schedule()
     elif args.telegram_setup:
@@ -1246,10 +1502,11 @@ if __name__ == "__main__":
         bot()
     else:
         try:
-            notify(run(discover_only=args.discover,
-                       retry_unsupported=args.retry_unsupported))  # silent when nothing is new
+            summary = run(discover_only=args.discover,
+                          retry_unsupported=args.retry_unsupported)
         except Busy:
-            sys.exit("Ya hay otra ejecución en curso.")
-        except SessionExpired as e:
-            notify(f"INACAP: la ejecución diaria falló. Sesión de Moodle: {e}")
-            sys.exit(f"La sesión de Moodle expiró — {e}.")
+            sys.exit("Ya hay otra ejecución en curso.")  # not a failure: skip
+        except Exception as e:
+            report_failure(e)
+            raise  # the traceback belongs in the log, where it can be diagnosed
+        report_success(summary)

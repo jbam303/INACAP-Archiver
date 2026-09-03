@@ -272,6 +272,7 @@ python3 archiver.py --discover     # lista lo encontrado, sin descargar
 python3 archiver.py                # descarga lo nuevo (+ respaldo a Drive si está activo)
 python3 archiver.py --login        # fuerza el inicio de sesión automático
 python3 archiver.py --bot          # atiende los comandos de Telegram
+python3 archiver.py --check        # revisa la instalación y muestra qué falta
 python3 archiver.py --self-test    # verificaciones internas, sin conexión
 python3 archiver.py --retry-unsupported   # reintenta lo marcado como no soportado
 python3 archiver.py --install-schedule    # programa la ejecución diaria de las 08:00
@@ -280,6 +281,32 @@ python3 notebooklm_sync.py                # sube el material a NotebookLM
 ```
 
 Para volver a descargar un recurso, elimina su entrada del `manifest.json`.
+
+---
+
+## 🩺 Cuando algo no funciona
+
+```bash
+python3 archiver.py --check
+```
+
+Recorre la instalación completa en orden y muestra dónde se corta:
+
+```
+  ✓  Python            Python 3.11.9
+  ✓  Dependencias      requests y playwright instalados
+  ✗  Credenciales      no existe .env — copia .env.example y complétalo
+  ✗  Sesión de Moodle  Todavía no hay sesión de Moodle...
+  ·  Google Drive      desactivado (DRIVE_REMOTE vacío en el .env)
+  ·  Telegram          desactivado (sin TELEGRAM_TOKEN o TELEGRAM_CHAT_ID)
+  ✓  Ejecución diaria  programada a las 08:00
+```
+
+El punto (`·`) marca lo que está desactivado a propósito, y no cuenta como
+error. Solo la cruz (`✗`) hace que el comando termine con código 1.
+
+Los valores propios salen enmascarados (`22·····4-7`), así que **puedes pegar
+esta salida tal cual** al pedir ayuda sin publicar tu RUT ni tu chat.
 
 ---
 

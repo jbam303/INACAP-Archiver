@@ -15,6 +15,7 @@ downloads/
 virtual.inacap.cl/
 manifest.json
 notebooklm.json
+.last-run.json
 *.log
 .lock
 
