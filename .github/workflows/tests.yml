@@ -22,9 +22,12 @@ jobs:
           - { os: ubuntu-latest, python: "3.13" }
           - { os: windows-latest, python: "3.9" }
           - { os: windows-latest, python: "3.13" }
-          # macos-latest es arm64 y no tiene build de Python 3.9;
-          # macos-13 es x86_64 y sí. De paso se cubren las dos arquitecturas.
-          - { os: macos-13, python: "3.9" }
+          # Sin 3.9 en macOS: macos-latest es arm64 y no tiene ese build, y los
+          # runners macos-13 (x86_64, que sí lo tienen) ya no se asignan — la
+          # tarea quedaba en cola para siempre y la ejecución nunca terminaba.
+          # Python 3.9 queda cubierto igual en Ubuntu y Windows, que es donde
+          # vive el código específico de cada sistema.
+          - { os: macos-latest, python: "3.11" }
           - { os: macos-latest, python: "3.13" }
 
     steps:
