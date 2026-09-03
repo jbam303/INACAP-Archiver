@@ -1,0 +1,44 @@
+name: tests
+
+# El README promete macOS, Linux y Windows con Python 3.9 o superior. Esto lo
+# comprueba en vez de suponerlo: el bloqueo de ejecución única, la codificación
+# de la salida y las reglas del .gitignore se comportan distinto en cada sistema.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  self-test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Sin fail-fast: si un sistema falla, interesa ver también los otros.
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, python: "3.9" }
+          - { os: ubuntu-latest, python: "3.13" }
+          - { os: windows-latest, python: "3.9" }
+          - { os: windows-latest, python: "3.13" }
+          # macos-latest es arm64 y no tiene build de Python 3.9;
+          # macos-13 es x86_64 y sí. De paso se cubren las dos arquitecturas.
+          - { os: macos-13, python: "3.9" }
+          - { os: macos-latest, python: "3.13" }
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      # Sin `pip install`: los --self-test son verificaciones sin conexión y
+      # solo usan la biblioteca estándar. requests y playwright se importan
+      # dentro de las funciones que los necesitan, no al cargar el módulo.
+      - name: Archivador
+        run: python archiver.py --self-test
+
+      - name: Sincronización con NotebookLM
+        run: python notebooklm_sync.py --self-test

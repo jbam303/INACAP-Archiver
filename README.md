@@ -1,5 +1,7 @@
 # 📚 INACAP Archiver
 
+[![tests](https://github.com/jbam303/INACAP-Archiver/actions/workflows/tests.yml/badge.svg)](https://github.com/jbam303/INACAP-Archiver/actions/workflows/tests.yml)
+
 Archivador automático para el campus virtual de INACAP (`aai.inacap.cl`).
 Descarga el material de tus ramos, lo organiza en tu equipo y, opcionalmente, lo
 respalda en tu Google Drive. Se ejecuta una vez al día de forma automática, sin

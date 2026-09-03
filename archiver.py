@@ -1181,9 +1181,14 @@ def self_test() -> None:
 # .gitignore has its own syntax and a plausible-looking rule can silently fail.
 # A trailing "# comment" on a pattern line is NOT a comment — it becomes part of
 # the pattern — which is exactly how !.env.example once stopped working.
+# Rutas de ARCHIVO, no de carpeta: una regla como "archive/" solo casa con
+# directorios, y en un clon recién hecho esa carpeta todavía no existe, así que
+# git no la reconoce como tal y la comprobación pasaría en falso. Lo que importa
+# igual es que no entre lo que hay dentro.
 _MUST_IGNORE = (".env", "cookies.txt", "aai.curlrc", "virtual.curlrc",
                 "manifest.json", "notebooklm.json", "archiver.log", "bot.log",
-                "archive", ".atl", ".DS_Store", "__pycache__", ".lock")
+                "archive/Ramo/apunte.pdf", ".atl/skill-registry.md",
+                ".DS_Store", "__pycache__/archiver.cpython-311.pyc", ".lock")
 _MUST_KEEP = (".env.example", "archiver.py", "README.md", "requirements.txt")
 
 
