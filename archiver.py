@@ -407,16 +407,50 @@ def dest_for(rec: dict) -> pathlib.Path:
 
 
 # Fields in the Rise content model that hold human-readable prose.
+#
+# "destination" is not prose: it is the URL of a link block, and it is here
+# because dropping it lost every citation the material makes. A link block
+# renders its label and description through the keys above, so the markdown
+# announced "IR a la lectura" and then led nowhere. Keeping the URL also feeds
+# notebooklm_sync, which mines the archived text for sources to upload.
+# Deliberately absent: thumbnail, coverImageDefault, navigationOverlayImage and
+# favicon are artwork, and originalUrl/providerUrl belong to an embed's player
+# rather than to anything the author chose to cite.
 _TEXT_KEYS = {
     "description", "title", "text", "caption", "heading", "paragraph",
     "content", "label", "altText", "body", "term", "definition",
-    "question", "answer",
+    "question", "answer", "destination",
 }
 _DOC_RE = re.compile(r"\.(pdf|docx?|pptx?|xlsx?|zip)$", re.IGNORECASE)
 
 
 def _strip_html(s: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html.unescape(s))).strip()
+
+
+_EMBED_SRC = re.compile(r'src="(https?://[^"]+)"', re.IGNORECASE)
+
+
+def _embed_url(block: dict) -> str | None:
+    """The address of an embedded player, when a block holds one.
+
+    Videos and interactives are not part of the package: they live on Vimeo,
+    Genially or INACAP's own player, so nothing can be downloaded and the
+    archive would otherwise lose every trace of them. Keeping the address at
+    least records that the material has a video, and where.
+
+    Rise stores it in originalUrl, either bare or wrapped in the whole <iframe>
+    the author pasted. That same field doubles as a scratch pad for asset
+    filenames and image-generation prompts, which is why only a real URL counts
+    — the rest would flood the markdown with noise.
+    """
+    raw = block.get("originalUrl")
+    if not isinstance(raw, str):
+        return None
+    if raw.startswith(("http://", "https://")):
+        return raw
+    m = _EMBED_SRC.search(raw)
+    return html.unescape(m.group(1)) if m else None
 
 
 def _lesson_text(node) -> list[str]:
@@ -426,6 +460,10 @@ def _lesson_text(node) -> list[str]:
 
     def walk(o, key=None):
         if isinstance(o, dict):
+            embed = _embed_url(o)
+            if embed and embed not in seen:
+                seen.add(embed)
+                out.append(embed)
             for k, v in o.items():
                 walk(v, k)
         elif isinstance(o, list):
@@ -1298,6 +1336,45 @@ def self_test() -> None:
     md = _render_markdown(course)
     assert "# RD Demo" in md and "## Lectura" in md, md
     assert "Intro & welcome" in md and "Cuerpo de la lección." in md, md
+
+    # A link block is a citation: its URL has to reach the markdown, or
+    # notebooklm_sync finds nothing to mine and the reader is told to "go read"
+    # something unreachable. Artwork keys stay out. The escaped "&" matters —
+    # the library permalinks carry query strings.
+    cited = {
+        "title": "Bibliografía",
+        "lessons": [{"title": "Unidad 1", "items": [{
+            "type": "link",
+            "label": "IR a la lectura",
+            "destination": "https://biblioteca.example/permalink?a=1&amp;b=2",
+            "thumbnail": "https://cdn.example/portada.png",
+        }]}],
+    }
+    md = _render_markdown(cited)
+    assert "https://biblioteca.example/permalink?a=1&b=2" in md, md
+    assert "portada.png" not in md, md
+
+    # originalUrl is only sometimes a URL: the same field carries asset
+    # filenames and the authors' image-generation prompts, so a bare match
+    # would bury the material under noise. Only the player address survives,
+    # unwrapped from the <iframe> when that is how it was pasted.
+    assert _embed_url({"originalUrl": "https://vimeo.com/123"}) == "https://vimeo.com/123"
+    assert _embed_url({"originalUrl": '<iframe src="https://v.cl/p.html?a=1&amp;b=2" '
+                                      'width="640"></iframe>'}) == "https://v.cl/p.html?a=1&b=2"
+    assert _embed_url({"originalUrl": "mountains.jpg"}) is None
+    assert _embed_url({"originalUrl": "icono-de-lupa.-No-incluir-palabras."}) is None
+    assert _embed_url({"crushedKey": "x.png"}) is None
+
+    con_video = {
+        "title": "Con video",
+        "lessons": [{"title": "U1", "items": [
+            {"type": "embed", "originalUrl": "https://player.vimeo.com/video/99"},
+            {"type": "image", "originalUrl": "una-oficina-moderna.-No-incluir-texto."},
+        ]}],
+    }
+    md = _render_markdown(con_video)
+    assert "https://player.vimeo.com/video/99" in md, md
+    assert "oficina-moderna" not in md, md
 
     data = {
         "course": course,

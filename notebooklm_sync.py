@@ -105,6 +105,13 @@ _SCHEMA_HOSTS = ("schemas.openxmlformats.org", "schemas.microsoft.com",
                  "purl.org", "w3.org", "ns.adobe.com", "iec.ch", "color.org",
                  "sheetjs.openxmlformats.org")
 
+# Reproductores de medios incrustados. El archivador guarda estas URLs en el
+# material para dejar constancia de que hay un video y dónde está, pero como
+# fuente no sirven: de los sitios de video NotebookLM solo acepta YouTube, así
+# que subirlas dejaría una fila en error y nada legible en el cuaderno. YouTube
+# queda fuera de la lista a propósito, porque ese sí lo acepta.
+_EMBED_HOSTS = ("vimeo.com", "vimeocdn.com", "genially.com")
+
 # Ni el Moodle propio (ya está archivado) ni nada local.
 _NOT_A_REFERENCE = re.compile(
     r"^https?://(localhost|127\.|0\.0\.0\.0|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)"
@@ -126,7 +133,8 @@ def is_reference(url: str) -> bool:
     if not url.startswith(("http://", "https://")):
         return False
     host = url.split("/")[2].lower() if len(url.split("/")) > 2 else ""
-    if any(host == h or host.endswith("." + h) for h in _SCHEMA_HOSTS):
+    if any(host == h or host.endswith("." + h)
+           for h in _SCHEMA_HOSTS + _EMBED_HOSTS):
         return False
     return not _NOT_A_REFERENCE.search(url)
 
@@ -495,6 +503,12 @@ def self_test() -> None:
     assert not is_reference("http://schemas.microsoft.com/office/word/2010/wordml")
     assert not is_reference("http://purl.org/dc/elements/1.1")
     assert not is_reference("http://www.w3.org/2001/XMLSchema-instance")
+
+    # El material guarda la URL del video, pero NotebookLM no la puede leer.
+    assert not is_reference("https://vimeo.com/1206874574")
+    assert not is_reference("https://player.vimeo.com/video/1192639937")
+    assert not is_reference("https://view.genially.com/6a455112965607306643250c")
+    assert is_reference("https://www.youtube.com/watch?v=abc"), "YouTube sí lo acepta"
     assert is_reference("https://www.kdnuggets.com/gpspubs/aimag-kdd-overview-1996-Fayyad.pdf")
 
     # Una referencia que NotebookLM rechazó queda en el cuaderno como fuente en
