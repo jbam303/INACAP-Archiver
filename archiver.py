@@ -36,6 +36,7 @@ import pathlib
 import re
 import sys
 import time
+import types
 import urllib.parse
 
 ROOT = pathlib.Path(__file__).parent
@@ -294,11 +295,22 @@ def course_name(html: str, course_id: int) -> str:
 
 
 def resolve(session, moodle_id: str) -> str | None:
-    """Follow a /mod/url redirector to its final virtual.inacap.cl URL."""
+    """Final URL behind a /mod/url redirector, read without leaving Moodle.
+
+    Moodle answers with a 303 whose Location already carries the target, so the
+    header is all we need. Following it would fetch a third-party host only to
+    throw the page away — and not every /mod/url points at the repositorio: one
+    of them is a multi-megabyte dataset tarball served over slow plain HTTP.
+    Downloading it hung the whole run, because a read timeout restarts on every
+    chunk that arrives, so a server that trickles bytes never trips it.
+    """
     r = session.get(
-        f"{MOODLE}/mod/url/view.php?id={moodle_id}&redirect=1", timeout=40
+        f"{MOODLE}/mod/url/view.php?id={moodle_id}&redirect=1",
+        timeout=40,
+        allow_redirects=False,
     )
-    return r.url if REPO_HOST in r.url else None
+    location = r.headers.get("Location", "")
+    return location if REPO_HOST in location else None
 
 
 def discover_courses(session) -> list[int]:
@@ -354,7 +366,13 @@ def discover(session) -> list[dict]:
             }
             if kind == "url":
                 # A package on virtual (Rise/Storyline); resolve to its real URL.
-                url = resolve(session, moodle_id)
+                try:
+                    url = resolve(session, moodle_id)
+                except Exception as e:
+                    # One unreachable redirector costs one resource, not the
+                    # whole run — same rule as an inaccessible course above.
+                    print(f"no se pudo resolver {moodle_id} ({name}): {e}")
+                    continue
                 if not url:
                     continue  # external link or non-repositorio target — skip
                 parts = repo_parts(url)
@@ -1423,8 +1441,50 @@ def self_test() -> None:
     assert _tool_path("", posix=True).startswith("/opt/homebrew/bin")
     # Windows separates PATH with ";" and has no Homebrew — leave it untouched.
     assert _tool_path(r"C:\Windows;C:\rclone", posix=False) == r"C:\Windows;C:\rclone"
+    _resolve_test()
     _gitignore_test()
     print("Verificaciones OK")
+
+
+class _FakeSession:
+    """Records the kwargs of the last get() and answers a canned Location."""
+
+    def __init__(self, location: str):
+        self.location, self.kwargs = location, {}
+
+    def get(self, url, **kwargs):
+        self.kwargs = kwargs
+        return types.SimpleNamespace(headers={"Location": self.location})
+
+
+def _resolve_test() -> None:
+    """resolve() must read the redirect, never walk it off Moodle.
+
+    Following it downloaded a dataset tarball from a slow third-party host and
+    hung every run — the daily one and the bot, which polls single-threaded.
+    """
+    repo = f"https://{REPO_HOST}/repositorio/X/content/index.php?sci=abc"
+    s = _FakeSession(repo)
+    assert resolve(s, "1") == repo, resolve(s, "1")
+    assert s.kwargs["allow_redirects"] is False, s.kwargs
+    # Off-site target, and a page that never redirects at all: both are skipped.
+    assert resolve(_FakeSession("http://mtg.upf.edu/d/set.tar.gz"), "1") is None
+    assert resolve(_FakeSession(""), "1") is None
+
+    # A resolver that raises costs one resource, not every course.
+    saved = {n: globals()[n] for n in
+             ("discover_courses", "fetch_course", "parse_resources", "resolve")}
+    globals().update(
+        discover_courses=lambda session: [1],
+        fetch_course=lambda session, cid: "<title>Curso: Demo | AAI</title>",
+        parse_resources=lambda html: [("1", "url", "roto"), ("2", "resource", "sano")],
+        resolve=lambda session, mid: (_ for _ in ()).throw(RuntimeError("host caído")),
+    )
+    try:
+        found = discover(None)
+    finally:
+        globals().update(saved)
+    assert [r["id"] for r in found] == ["2"], found
 
 
 # Paths git must keep out of the repository, and the one placeholder that must
