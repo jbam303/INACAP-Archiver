@@ -266,6 +266,13 @@ Es **idempotente**: puedes ejecutarlo cuantas veces quieras. Lleva registro en
 `notebooklm.json` (ignorado por git) y verifica contra el cuaderno real, así que
 si borras una fuente en NotebookLM, la próxima ejecución la repone.
 
+Una referencia que NotebookLM rechaza queda anotada como tal y no se vuelve a
+ofrecer. No es lo mismo que un enlace muerto: cuando el rechazo llega como fallo
+de la petición no queda ninguna fuente en el cuaderno, ni siquiera en error, así
+que mirar el cuaderno no basta para saber que ya se intentó. Sin esa constancia
+se reintentarían todas las ejecuciones. Con `--reintentar-rechazadas` vuelven a
+la cola, por si el sitio caído revivió.
+
 ```bash
 python3 notebooklm_sync.py --ramo "Big Data"   # un solo ramo
 ```
@@ -293,6 +300,7 @@ python3 archiver.py --install-schedule    # programa la ejecución diaria de las
 python3 archiver.py --telegram-setup      # muestra el chat id para el .env
 python3 notebooklm_sync.py                # sube el material a NotebookLM
 python3 notebooklm_sync.py --sin-referencias   # solo el material, sin enlaces citados
+python3 notebooklm_sync.py --reintentar-rechazadas  # vuelve a ofrecer lo que NotebookLM rechazó
 ```
 
 Para volver a descargar un recurso, elimina su entrada del `manifest.json`.

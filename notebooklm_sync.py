@@ -17,6 +17,7 @@ Uso:
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import re
 import pathlib
@@ -195,12 +196,28 @@ def needs_login(output: str) -> bool:
     return "AUTH_REQUIRED" in output or "notebooklm login" in output
 
 
-def new_references(refs: list, existing: set) -> list:
-    """Las referencias que el cuaderno todavía no tiene, en ningún estado.
+def rejected_urls(state: dict) -> set:
+    """Las URLs que NotebookLM ya rechazó y no vale la pena volver a ofrecer.
 
-    Se compara contra el cuaderno real y no contra el registro local, porque una
-    URL que NotebookLM rechazó queda ahí como fuente en `error`: reintentarla
-    cada día solo acumularía copias fallidas de lo mismo.
+    Cuando el rechazo llega como fallo del RPC no queda ninguna fuente en el
+    cuaderno, ni siquiera en `error`, así que mirar el cuaderno no alcanza para
+    saber que ya se intentó. Sin esta constancia se reintentan todas las
+    corridas: 21 subidas condenadas por sincronización en el caso que lo
+    destapó, la mayoría permalinks de la biblioteca que nunca van a entrar.
+
+    Se limpian con --reintentar-rechazadas, igual que las actividades en espera
+    del archivador, porque un sitio caído hoy puede volver mañana.
+    """
+    return {u for u, v in state.items() if v.get("kind") == "rechazada"}
+
+
+def new_references(refs: list, existing: set) -> list:
+    """Las referencias que todavía no se ofrecieron, en ningún estado.
+
+    `existing` junta las URLs que el cuaderno ya tiene con las que NotebookLM
+    rechazó antes. Lo primero se mira contra el cuaderno real y no contra el
+    registro local, para que borrar una fuente a mano la recupere; lo segundo
+    solo vive en el registro, porque un rechazo no deja rastro en el cuaderno.
     """
     return [u for u in refs if u not in existing]
 
@@ -439,7 +456,7 @@ def sync(only: str | None, dry_run: bool,
         # mismo cuaderno a propósito: así se pueden consultar junto al documento
         # que las cita, que es de donde sale el valor.
         refs = new_references(references_in([ARCHIVE / r for r in rels]),
-                              urls_presentes)
+                              urls_presentes | rejected_urls(state))
         if refs:
             vivas = reachable(refs)
             muertas = len(refs) - len(vivas)
@@ -454,6 +471,11 @@ def sync(only: str | None, dry_run: bool,
                     save_state(state)
                     total_new += 1
                 else:
+                    # Queda constancia para no volver a ofrecerla: el rechazo no
+                    # dejó nada en el cuaderno donde pudiera verse.
+                    state[url] = {"title": url, "kind": "rechazada",
+                                  "at": dt.datetime.now().isoformat(timespec="seconds")}
+                    save_state(state)
                     total_failed += 1
 
     if not dry_run:
@@ -479,6 +501,22 @@ def self_test() -> None:
     assert usable("application/pdf", ""), "un PDF no se inspecciona, se entrega"
     assert usable("text/plain", ""), "lo que no es HTML tampoco"
     assert not usable("text/html", ""), "una respuesta vacía no es una fuente"
+
+    # Una URL que NotebookLM rechaza NO deja fuente en el cuaderno: el RPC falla
+    # antes de crearla. Sin dejar constancia acá, new_references la vuelve a
+    # proponer en cada corrida, para siempre.
+    registro = {
+        "a.pdf": {"source_id": "S1"},
+        "https://viva.example": {"source_id": "S2", "kind": "referencia"},
+        "https://rechazada.example": {"kind": "rechazada", "at": "2026-09-11T12:00:00"},
+    }
+    assert rejected_urls(registro) == {"https://rechazada.example"}
+    assert rejected_urls({}) == set()
+    assert known_ids(registro) == {"S1", "S2"}, "una rechazada no aporta source_id"
+    assert pending(["a.pdf"], registro, {"S1"}) == [], "no confundir claves de URL con archivos"
+    assert new_references(
+        ["https://rechazada.example", "https://nueva.example"],
+        {"https://viva.example"} | rejected_urls(registro)) == ["https://nueva.example"]
 
     names = {
         "Minería de Datos/U0/TI3061_U0_PA": "Presentación de la Asignatura",
@@ -579,11 +617,21 @@ if __name__ == "__main__":
                     help="muestra qué subiría, sin subir nada")
     ap.add_argument("--sin-referencias", action="store_true",
                     help="no subir las fuentes citadas dentro del material")
+    ap.add_argument("--reintentar-rechazadas", action="store_true",
+                    help="vuelve a ofrecer las referencias que NotebookLM rechazó")
     ap.add_argument("--self-test", action="store_true",
                     help="verificaciones internas, sin conexión")
     args = ap.parse_args()
 
     if args.self_test:
         self_test()
+    elif args.reintentar_rechazadas:
+        registro = load_json(STATE)
+        olvidadas = rejected_urls(registro)
+        for url in olvidadas:
+            del registro[url]
+        save_state(registro)
+        print(f"{len(olvidadas)} referencia(s) rechazada(s) vuelven a la cola."
+              if olvidadas else "No hay referencias rechazadas registradas.")
     else:
         sync(args.ramo, args.dry_run, args.sin_referencias)
