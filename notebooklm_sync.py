@@ -246,14 +246,31 @@ def usable(content_type: str, body: str) -> bool:
     return len(" ".join(visible.split())) >= TEXTO_MINIMO
 
 
-def reachable(urls: list, timeout: int = 10) -> list:
-    """Las URLs que responden 200 y traen algo que subir, en paralelo.
+def reference_tally(vivas: int, vacias: int, mudas: int) -> str:
+    """Cómo quedaron las referencias citadas, en una línea.
 
-    Se comprueba antes de subir en vez de dejar que NotebookLM lo descubra: un
-    404 puede ingerirse igual y quedar como fuente con el cuerpo del error
-    adentro, que es peor que no tener la referencia. Los enlaces muertos del
-    material no se registran, así que un reintento futuro los recupera si
-    vuelven a vivir.
+    Los dos motivos de descarte van separados a propósito: una página que
+    responde 200 y llega sin texto es un problema de JavaScript, no de red.
+    Llamar a las dos cosas "sin respuesta" manda a buscar el problema al lugar
+    equivocado, que es justo lo que este proyecto ya pagó caro una vez.
+    """
+    partes = [f"{vivas} accesibles"]
+    if vacias:
+        partes.append(f"{vacias} sin texto que subir")
+    if mudas:
+        partes.append(f"{mudas} sin respuesta")
+    return ", ".join(partes) + (" (se omiten)" if vacias or mudas else "")
+
+
+def reachable(urls: list, timeout: int = 10) -> tuple:
+    """(las que traen algo que subir, las que responden pero llegan vacías).
+
+    Lo que no responde no sale en ninguna de las dos listas; el caller lo
+    deduce del total. Se comprueba antes de subir en vez de dejar que
+    NotebookLM lo descubra: un 404 puede ingerirse igual y quedar como fuente
+    con el cuerpo del error adentro, que es peor que no tener la referencia.
+    Nada de esto se registra, así que un reintento futuro lo recupera si vuelve
+    a vivir —a diferencia de un rechazo de NotebookLM, que sí queda anotado.
     """
     import concurrent.futures
     import requests
@@ -263,14 +280,16 @@ def reachable(urls: list, timeout: int = 10) -> list:
             r = requests.get(url, timeout=timeout, allow_redirects=True,
                              headers={"User-Agent": USER_AGENT})
             if r.status_code != 200:
-                return None
+                return url, "muda"
             tipo = r.headers.get("content-type", "").split(";")[0]
-            return url if usable(tipo, r.text) else None
+            return url, ("viva" if usable(tipo, r.text) else "vacia")
         except Exception:
-            return None
+            return url, "muda"
 
     with concurrent.futures.ThreadPoolExecutor(8) as pool:
-        return [u for u in pool.map(probe, urls) if u]
+        veredictos = list(pool.map(probe, urls))
+    return ([u for u, v in veredictos if v == "viva"],
+            [u for u, v in veredictos if v == "vacia"])
 
 
 # --- state -------------------------------------------------------------------
@@ -458,10 +477,10 @@ def sync(only: str | None, dry_run: bool,
         refs = new_references(references_in([ARCHIVE / r for r in rels]),
                               urls_presentes | rejected_urls(state))
         if refs:
-            vivas = reachable(refs)
-            muertas = len(refs) - len(vivas)
-            print(f"  referencias citadas: {len(vivas)} accesibles"
-                  + (f", {muertas} sin respuesta (se omiten)" if muertas else ""))
+            vivas, vacias = reachable(refs)
+            mudas = len(refs) - len(vivas) - len(vacias)
+            print("  referencias citadas: "
+                  + reference_tally(len(vivas), len(vacias), mudas))
             for url in vivas:
                 print(f"  subiendo referencia: {url[:70]} ...", flush=True)
                 source_id = upload_url(url, notebook)
@@ -501,6 +520,15 @@ def self_test() -> None:
     assert usable("application/pdf", ""), "un PDF no se inspecciona, se entrega"
     assert usable("text/plain", ""), "lo que no es HTML tampoco"
     assert not usable("text/html", ""), "una respuesta vacía no es una fuente"
+
+    # Una página que responde 200 y llega vacía no tiene nada que ver con una que
+    # no responde. Contarlas juntas manda a depurar la red cuando el problema es
+    # que el contenido lo arma JavaScript, así que la línea las separa.
+    assert reference_tally(4, 0, 0) == "4 accesibles"
+    assert reference_tally(0, 16, 2) == \
+        "0 accesibles, 16 sin texto que subir, 2 sin respuesta (se omiten)"
+    assert reference_tally(3, 0, 2) == "3 accesibles, 2 sin respuesta (se omiten)"
+    assert "sin texto que subir" in reference_tally(0, 1, 0)
 
     # Una URL que NotebookLM rechaza NO deja fuente en el cuaderno: el RPC falla
     # antes de crearla. Sin dejar constancia acá, new_references la vuelve a
