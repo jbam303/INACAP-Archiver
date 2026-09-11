@@ -205,8 +205,32 @@ def new_references(refs: list, existing: set) -> list:
     return [u for u in refs if u not in existing]
 
 
+_SIN_TEXTO = re.compile(r"(?is)<(script|style|noscript)\b.*?</\1>")
+_ETIQUETA = re.compile(r"(?s)<[^>]+>")
+TEXTO_MINIMO = 40
+
+
+def usable(content_type: str, body: str) -> bool:
+    """Si NotebookLM va a encontrar algo que ingerir en esta respuesta.
+
+    Solo se inspecciona el HTML: un PDF o un texto plano se entregan tal cual,
+    porque su contenido no está en el cuerpo que se ve acá.
+
+    Existe por los permalinks de la biblioteca INACAP, que responden 200 y
+    llegan vacíos —son un cascarón de Angular que arma el contenido por
+    JavaScript—, así que pasaban un filtro de "responde" y NotebookLM los
+    rechazaba después. Medido contra las URLs reales del material: el cascarón
+    da 0 caracteres y la página viva más corta daba 1806, de modo que el piso
+    distingue los dos casos sin acercarse a ninguno.
+    """
+    if "html" not in content_type.lower():
+        return bool(content_type)
+    visible = _ETIQUETA.sub(" ", _SIN_TEXTO.sub(" ", body))
+    return len(" ".join(visible.split())) >= TEXTO_MINIMO
+
+
 def reachable(urls: list, timeout: int = 10) -> list:
-    """Las URLs que responden 200, en paralelo.
+    """Las URLs que responden 200 y traen algo que subir, en paralelo.
 
     Se comprueba antes de subir en vez de dejar que NotebookLM lo descubra: un
     404 puede ingerirse igual y quedar como fuente con el cuerpo del error
@@ -221,7 +245,10 @@ def reachable(urls: list, timeout: int = 10) -> list:
         try:
             r = requests.get(url, timeout=timeout, allow_redirects=True,
                              headers={"User-Agent": USER_AGENT})
-            return url if r.status_code == 200 else None
+            if r.status_code != 200:
+                return None
+            tipo = r.headers.get("content-type", "").split(";")[0]
+            return url if usable(tipo, r.text) else None
         except Exception:
             return None
 
@@ -438,6 +465,20 @@ def self_test() -> None:
     assert is_uploadable("a.PDF") and is_uploadable("x.md")
     assert not is_uploadable("foto.jpg"), "las imágenes de Rise no son fuentes"
     assert not is_uploadable("curso.zip"), "NotebookLM no acepta .zip"
+
+    # Los permalinks de la biblioteca INACAP responden 200 y llegan vacíos: el
+    # contenido lo arma JavaScript después. Medido contra las URLs reales, la
+    # página viva más corta del material tenía 1806 caracteres y el cascarón 0,
+    # así que el piso separa los dos casos sin rozar ninguno.
+    cascaron = ('<html><head><script src="/app.js"></script>'
+                '<style>body{margin:0}</style></head><body>'
+                '<app-root></app-root><noscript>Activa JavaScript</noscript>'
+                '</body></html>')
+    assert not usable("text/html", cascaron), "una página armada por JS llega vacía"
+    assert usable("text/html", "<html><body><p>" + "texto real. " * 20 + "</p></body></html>")
+    assert usable("application/pdf", ""), "un PDF no se inspecciona, se entrega"
+    assert usable("text/plain", ""), "lo que no es HTML tampoco"
+    assert not usable("text/html", ""), "una respuesta vacía no es una fuente"
 
     names = {
         "Minería de Datos/U0/TI3061_U0_PA": "Presentación de la Asignatura",
