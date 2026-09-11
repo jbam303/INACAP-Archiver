@@ -239,6 +239,12 @@ python3 notebooklm_sync.py --dry-run    # qué subiría, sin subir nada
 python3 notebooklm_sync.py              # súbelo
 ```
 
+Con el CLI instalado ya no hace falta correrlo a mano: cada ejecución que
+descargue material nuevo lo sincroniza sola, al terminar el respaldo a Drive.
+Tener instalado `notebooklm` **es** la forma de activarlo; si no está, el paso
+se omite con un aviso y la corrida sigue normal. Los comandos de arriba quedan
+para cuando quieras forzar una sincronización o revisar qué falta.
+
 Cada documento pasa por **subir → esperar el procesamiento → renombrar**. El
 paso de espera no es decorativo: `source add` termina bien apenas se acepta la
 subida, no cuando la fuente quedó lista, así que un archivo que falla al

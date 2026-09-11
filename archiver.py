@@ -55,6 +55,9 @@ REPO_HOST = "virtual.inacap.cl"
 # ~149 MB as "videos"; not worth mirroring daily. PDFs/PPTX/text are unaffected
 # in practice. Raise it to keep everything.
 MAX_ASSET_MB = 50
+# Generous on purpose: the first sync of a term's backlog took 11 minutes. What
+# this bounds is not slowness, it is a stall — see sync_to_notebooklm.
+NOTEBOOKLM_TIMEOUT = 30 * 60
 
 # Optional Google Drive sync, configured per-install in .env as
 #   DRIVE_REMOTE=gdrive:INACAP
@@ -753,7 +756,12 @@ def _run(discover_only: bool, retry_unsupported: bool = False) -> str:
             print(f"  guardados {len(result['files'])} archivo(s)")
 
     sync_to_drive()
-    return summarize(saved)
+    resumen = summarize(saved)
+    if saved:  # nothing downloaded means nothing to hand over; skip the CLI
+        aviso = sync_to_notebooklm()
+        if aviso:  # ride the summary out to Telegram, don't die in the log
+            resumen += f"\n{aviso}"
+    return resumen
 
 
 def _tool_path(env_path: str, posix: bool = os.name != "nt") -> str:
@@ -801,6 +809,75 @@ def sync_to_drive() -> None:
         [rclone, "copy", str(ARCHIVE), remote, "--fast-list"]
     ).returncode
     print("  Respaldo completado." if rc == 0 else f"  El respaldo falló (rclone salió con {rc}).")
+
+
+def _notebooklm_cli(path_env: str, python: str) -> str:
+    """The notebooklm CLI, or "" when it is not installed.
+
+    Mirrors notebooklm_sync._cli_path, fallback included: pip puts the CLI next
+    to the interpreter inside a venv or pyenv, and launchd runs the daily job
+    with a minimal PATH where `which` alone would never find it.
+    """
+    import shutil
+
+    beside = pathlib.Path(python).parent / "notebooklm"
+    if beside.exists():
+        return str(beside)
+    return shutil.which("notebooklm", path=_tool_path(path_env)) or ""
+
+
+def _sync_outcome(rc: int | None) -> str:
+    """What the Telegram summary should say about a finished sync.
+
+    Empty when it went fine, so a good run stays quiet. `None` means it hit the
+    timeout — the only outcome the user cannot see coming from the archive
+    itself, so it says out loud that the material is downloaded but not synced.
+    """
+    if rc == 0:
+        return ""
+    if rc is None:
+        return ("⚠ NotebookLM: la sincronización se colgó y se cortó. El material "
+                "está descargado; se reintenta en la próxima corrida.")
+    return f"⚠ NotebookLM: la sincronización falló (salió con {rc})."
+
+
+def sync_to_notebooklm() -> str:
+    """Hand the freshly archived material to NotebookLM, if its CLI is there.
+
+    Returns the line for the Telegram summary; empty when there is nothing to
+    report. Same contract as sync_to_drive: it never raises, because an optional
+    tool must not take the archiving run down with it.
+
+    ponytail: a subprocess instead of an import — notebooklm_sync calls
+    sys.exit() when the CLI is missing, and that would end the run too.
+    Installing the CLI is the opt-in; there is no second switch to forget.
+
+    The timeout is the point, not a detail. The CLI talks to undocumented Google
+    endpoints and bounds nothing itself, and this call sits inside the run lock:
+    a stall here freezes the daily job AND the single-threaded bot, which is the
+    exact outage resolve() already caused once.
+    """
+    import subprocess
+
+    cli = _notebooklm_cli(os.environ.get("PATH", ""), sys.executable)
+    if not cli:
+        print("Sincronización con NotebookLM omitida: el CLI no está instalado (ver README).")
+        return ""
+    script = pathlib.Path(__file__).with_name("notebooklm_sync.py")
+    print("Sincronizando con NotebookLM ...", flush=True)
+    try:
+        rc = subprocess.run([sys.executable, str(script)],
+                            timeout=NOTEBOOKLM_TIMEOUT).returncode
+    except subprocess.TimeoutExpired:
+        # ponytail: kills the child, not any notebooklm CLI it spawned — those
+        # are orphaned and exit on their own. Reaping the whole process group
+        # is the upgrade if a stray CLI ever holds something open.
+        rc = None
+        print(f"  Se cortó por tiempo ({NOTEBOOKLM_TIMEOUT // 60} min).")
+    else:
+        print("  Sincronización completada." if rc == 0
+              else f"  La sincronización falló (salió con {rc}).")
+    return _sync_outcome(rc)
 
 
 # --- Daily schedule ---------------------------------------------------------
@@ -1432,6 +1509,27 @@ def self_test() -> None:
     assert _drive_remote({}) == "", "Drive must be off unless configured"
     assert _drive_remote({"DRIVE_REMOTE": ""}) == ""
     assert _drive_remote({"DRIVE_REMOTE": " gdrive:INACAP "}) == "gdrive:INACAP"
+
+    # NotebookLM is handed the new material as a subprocess, so it has to be
+    # located first. launchd gives the daily run a minimal PATH, so `which`
+    # alone misses a CLI pip put beside the interpreter — which is exactly where
+    # it lives in a venv or pyenv. Missing CLI means skip, never crash.
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        binario = pathlib.Path(tmp) / "bin"
+        binario.mkdir()
+        (binario / "notebooklm").write_text("")
+        assert _notebooklm_cli("", str(binario / "python3")) == str(binario / "notebooklm"), \
+            "the CLI beside the interpreter is what launchd can actually find"
+        assert _notebooklm_cli("", str(pathlib.Path(tmp) / "vacio" / "python3")) == "", \
+            "no CLI means the sync is skipped, not a failed run"
+
+    # A sync that went fine must not add noise to the Telegram summary, and one
+    # that did not must never die inside the log: this is the line that carries
+    # it out. None is the timeout, which is the case that used to hang forever.
+    assert _sync_outcome(0) == "", "a clean sync stays out of the summary"
+    assert "colgó" in _sync_outcome(None), _sync_outcome(None)
+    assert "3" in _sync_outcome(3), "a failing exit code has to be readable"
 
     # The scheduler recipes are rendered from absolute paths the caller resolves.
     # Getting those paths right by hand is the step that trips people up, so the
