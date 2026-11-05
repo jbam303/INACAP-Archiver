@@ -83,20 +83,63 @@ El flujo completo:
 
 ## 🚀 Instalación
 
+Un solo comando. Copia el de tu sistema, pégalo en la terminal y responde lo
+que te pregunte (tu usuario y contraseña de INACAP).
+
+**macOS** (en la app Terminal):
+
+```bash
+curl -LsSf https://raw.githubusercontent.com/jbam303/INACAP-Archiver/main/install.sh | sh
+```
+
+**Windows** (en PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/jbam303/INACAP-Archiver/main/install.ps1 | iex
+```
+
+Queda todo en la carpeta `INACAP-Archiver` de tu usuario: descarga el
+programa, prepara Python y sus dependencias (con [uv](https://docs.astral.sh/uv/),
+no hace falta tener Python instalado), pide y prueba tus credenciales, programa
+la ejecución diaria de las 08:00 y termina con un `--check`.
+
+Para **actualizar**, ejecuta el mismo comando otra vez. Tu `.env`, tu
+`archive/` y el `manifest.json` no se tocan.
+
+### 🔑 Cambiar tu contraseña
+
+Si cambias tu contraseña de INACAP, vuelve a ejecutar el comando de instalación
+(actualiza y te pregunta de nuevo las credenciales), o solo el asistente:
+
+```bash
+# macOS
+~/INACAP-Archiver/.venv/bin/python ~/INACAP-Archiver/archiver.py --setup
+```
+
+```powershell
+# Windows (PowerShell)
+~\INACAP-Archiver\.venv\Scripts\python.exe ~\INACAP-Archiver\archiver.py --setup
+```
+
+Responde `n` cuando pregunte si mantener las guardadas; prueba el inicio de
+sesión antes de terminar.
+
+### Instalación manual
+
 ```bash
 git clone https://github.com/jbam303/INACAP-Archiver.git
 cd INACAP-Archiver
 python3 -m pip install -r requirements.txt
 python3 -m playwright install chromium
-cp .env.example .env        # luego edítalo con tus credenciales
+python3 archiver.py --setup  # pide tus credenciales y las guarda en el .env
 ```
 
-No te saltes el último paso aunque tengas Google Chrome. El inicio de sesión
+No te saltes el paso de Chromium aunque tengas Google Chrome. El inicio de sesión
 automático usa Chrome si puede, pero al ejecutarse desde el programador de
 tareas no siempre logra abrirlo, y ahí recurre al Chromium de Playwright. Sin
 ese respaldo, la ejecución diaria puede quedarse sin poder renovar la sesión.
 
-Luego configura el acceso (más abajo) y estará listo para ejecutarse.
+Luego programa la ejecución diaria (más abajo) y estará listo.
 
 ---
 
@@ -104,7 +147,8 @@ Luego configura el acceso (más abajo) y estará listo para ejecutarse.
 
 ### 1. Tus credenciales (es todo lo que necesitas)
 
-Crea un archivo `.env` (incluido en el `.gitignore`, nunca se sube) con tus
+El instalador y `archiver.py --setup` lo hacen por ti. Si prefieres a mano,
+crea un archivo `.env` (incluido en el `.gitignore`, nunca se sube) con tus
 credenciales de INACAP:
 
 ```
@@ -291,6 +335,7 @@ cuaderno y no en total, un ramo completo entra sin problema.
 ```bash
 python3 archiver.py --discover     # lista lo encontrado, sin descargar
 python3 archiver.py                # descarga lo nuevo (+ respaldo a Drive si está activo)
+python3 archiver.py --setup        # pide, guarda y prueba tu usuario y contraseña
 python3 archiver.py --login        # fuerza el inicio de sesión automático
 python3 archiver.py --bot          # atiende los comandos de Telegram
 python3 archiver.py --check        # revisa la instalación y muestra qué falta
@@ -318,7 +363,7 @@ Recorre la instalación completa en orden y muestra dónde se corta:
 ```
   ✓  Python            Python 3.11.9
   ✓  Dependencias      requests y playwright instalados
-  ✗  Credenciales      no existe .env — copia .env.example y complétalo
+  ✗  Credenciales      no existe .env — ejecuta archiver.py --setup
   ✗  Sesión de Moodle  Todavía no hay sesión de Moodle...
   ·  Google Drive      desactivado (DRIVE_REMOTE vacío en el .env)
   ·  Telegram          desactivado (sin TELEGRAM_TOKEN o TELEGRAM_CHAT_ID)

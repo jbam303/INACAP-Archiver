@@ -19,6 +19,7 @@ Auth map (verified):
 Usage:
   python3 archiver.py --discover      # list resources, resolve URLs, no download
   python3 archiver.py                  # discover + download new resources
+  python3 archiver.py --setup         # ask for and test the INACAP credentials
   python3 archiver.py --install-schedule  # register the daily 08:00 run
   python3 archiver.py --bot            # serve Telegram commands (long-poll)
   python3 archiver.py --self-test      # run offline parser checks
@@ -186,9 +187,9 @@ def make_session():
         # in .env, so try that before sending anyone to hunt through DevTools.
         if not refresh_cookie():
             sys.exit(
-                "Todavía no hay sesión de Moodle. Configura INACAP_USER/INACAP_PASS "
-                "en el .env (recomendado), o exporta la cookie a aai.curlrc. "
-                "Ver README."
+                "Todavía no hay sesión de Moodle. Configura tus credenciales con "
+                "archiver.py --setup (recomendado), o exporta la cookie a "
+                "aai.curlrc. Ver README."
             )
         cookie = load_cookie("aai.curlrc")
 
@@ -198,17 +199,90 @@ def make_session():
     return s
 
 
-def _load_env() -> dict:
-    """Parse KEY=VALUE lines from a gitignored .env (no dependency needed)."""
-    path = ROOT / ".env"
+def _parse_env(text: str) -> dict:
+    """Parse KEY=VALUE lines (no dependency needed).
+
+    Only one matching pair of surrounding quotes is dropped, so a quoted value
+    keeps quotes and edge spaces of its own — passwords can have both.
+    """
     env = {}
-    if path.exists():
-        for line in path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                k, v = line.split("=", 1)
-                env[k.strip()] = v.strip().strip('"').strip("'")
+    for line in text.splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k, v = line.split("=", 1)
+            v = v.strip()
+            if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+                v = v[1:-1]
+            env[k.strip()] = v
     return env
+
+
+def _load_env() -> dict:
+    """The gitignored .env, parsed."""
+    path = ROOT / ".env"
+    return _parse_env(path.read_text(encoding="utf-8")) if path.exists() else {}
+
+
+def _with_credentials(current: str | None, template: str, user: str, password: str) -> str:
+    """The .env text with INACAP_USER/INACAP_PASS set and every other line kept.
+
+    `current` is None when there is no .env yet; then the template is the start.
+    Values are always double-quoted, which _parse_env undoes exactly.
+    """
+    values = {"INACAP_USER": user, "INACAP_PASS": password}
+    out, written = [], set()
+    for line in (template if current is None else current).splitlines():
+        key = line.split("=", 1)[0].strip()
+        if "=" in line and key in values:
+            line = f'{key}="{values[key]}"'
+            written.add(key)
+        out.append(line)
+    out += [f'{k}="{v}"' for k, v in values.items() if k not in written]
+    return "\n".join(out) + "\n"
+
+
+def _yes(prompt: str) -> bool:
+    return input(prompt).strip().lower() in ("", "s", "si", "sí")
+
+
+def setup() -> None:
+    """Ask for the INACAP credentials, save them to .env and try them out."""
+    import getpass
+
+    env_path, example = ROOT / ".env", ROOT / ".env.example"
+    template = example.read_text(encoding="utf-8") if example.exists() else ""
+    env = _load_env()
+    user = env.get("INACAP_USER", "")
+    # Re-running the installer must not force retyping a password that works,
+    # but it is also how a student changes one, so the choice is theirs.
+    keep = bool(user and env.get("INACAP_PASS")
+                and user != _parse_env(template).get("INACAP_USER")
+                and _yes(f"Ya hay credenciales guardadas para {_mask(user)}. "
+                         "¿Mantenerlas? [S/n] (n = cambiarlas) "))
+    while True:
+        if not keep:
+            print("Ingresa tus datos de INACAP. Se guardan solo en este equipo (archivo .env).")
+            user = input("Usuario (correo @inacapmail.cl o RUT): ").strip()
+            password = getpass.getpass("Contraseña (no se ve mientras escribes): ")
+            if not user or not password:
+                print("Faltó el usuario o la contraseña.\n")
+                continue
+            current = env_path.read_text(encoding="utf-8") if env_path.exists() else None
+            env_path.write_text(_with_credentials(current, template, user, password),
+                                encoding="utf-8")
+            env_path.chmod(0o600)
+        try:
+            ok = refresh_cookie()
+        except Exception as e:  # no network, INACAP's page changed, ...
+            print(f"No se pudo conectar con INACAP ({type(e).__name__}: {e}).")
+            ok = False
+        if ok:
+            print("✓ Inicio de sesión correcto. Credenciales guardadas.")
+            return
+        print("✗ No se pudo iniciar sesión. Revisa el usuario y la contraseña.")
+        if not _yes("¿Intentar de nuevo? [S/n] "):
+            sys.exit("Sin credenciales válidas. Para reintentar: archiver.py --setup")
+        keep = False
 
 
 # Moodle cookies worth persisting; the rest (analytics) are dropped.
@@ -699,11 +773,11 @@ def _run(discover_only: bool, retry_unsupported: bool = False) -> str:
                 resources = discover(session)
             except SessionExpired:
                 raise SessionExpired(
-                    "el inicio automático falló — revisa INACAP_USER/INACAP_PASS en el .env")
+                    "el inicio automático falló — si cambiaste tu contraseña, ejecuta archiver.py --setup")
         else:
             raise SessionExpired(
-                "actualiza aai.curlrc, o configura INACAP_USER/INACAP_PASS en el "
-                ".env para el inicio automático")
+                "configura tus credenciales con archiver.py --setup, o actualiza "
+                "aai.curlrc")
     manifest = load_manifest()
     new = pending(resources, manifest, retry_unsupported)
     parked = sum(1 for v in manifest.values() if "unsupported" in v)
@@ -1187,12 +1261,12 @@ def _check_deps() -> tuple:
 def _check_credentials() -> tuple:
     env = _load_env()
     if not (ROOT / ".env").exists():
-        return FAIL, "no existe .env — copia .env.example y complétalo"
+        return FAIL, "no existe .env — ejecuta archiver.py --setup"
     if env.get("INACAP_USER") and env.get("INACAP_PASS"):
         return OK, f"INACAP_USER={_mask(env['INACAP_USER'])}"
     if (ROOT / "aai.curlrc").exists():
         return WARN, "sin credenciales; se usa la cookie manual de aai.curlrc"
-    return FAIL, "faltan INACAP_USER e INACAP_PASS en el .env"
+    return FAIL, "faltan INACAP_USER e INACAP_PASS — ejecuta archiver.py --setup"
 
 
 def _check_moodle() -> tuple:
@@ -1203,7 +1277,7 @@ def _check_moodle() -> tuple:
         return FAIL, str(e).splitlines()[0]
     except SessionExpired:
         return (OK, "la sesión estaba vencida y se renovó sola") if refresh_cookie() \
-            else (FAIL, "no se pudo iniciar sesión — revisa las credenciales")
+            else (FAIL, "no se pudo iniciar sesión — corrígelas con archiver.py --setup")
     except Exception as e:
         return FAIL, f"{type(e).__name__}: {e}"
 
@@ -1616,6 +1690,27 @@ def self_test() -> None:
     assert _tool_path("", posix=True).startswith("/opt/homebrew/bin")
     # Windows separates PATH with ";" and has no Homebrew — leave it untouched.
     assert _tool_path(r"C:\Windows;C:\rclone", posix=False) == r"C:\Windows;C:\rclone"
+
+    # --setup escribe las credenciales en el .env sin tocar nada más: ahí
+    # también viven Drive y Telegram, que alguien configuró a mano.
+    plantilla = ("# Credenciales\nINACAP_USER=tu-correo@inacapmail.cl\n"
+                 "INACAP_PASS=tu-contraseña\n# INACAP_USER=comentado\nDRIVE_REMOTE=\n")
+    nuevo = _with_credentials(None, plantilla, "ana@inacapmail.cl", "secreta")
+    assert _parse_env(nuevo) == {"INACAP_USER": "ana@inacapmail.cl",
+                                 "INACAP_PASS": "secreta", "DRIVE_REMOTE": ""}, nuevo
+    assert "# Credenciales" in nuevo and "# INACAP_USER=comentado" in nuevo, nuevo
+    assert "tu-contraseña" not in nuevo, "el placeholder se reemplaza"
+    actual = "TELEGRAM_TOKEN=123:abc\nINACAP_USER=vieja\nINACAP_PASS=vieja\n"
+    env = _parse_env(_with_credentials(actual, plantilla, "ana", "nueva"))
+    assert env == {"TELEGRAM_TOKEN": "123:abc", "INACAP_USER": "ana",
+                   "INACAP_PASS": "nueva"}, "con .env existente no se usa la plantilla"
+    assert _parse_env(_with_credentials("A=1", "", "u", "p")) == \
+        {"A": "1", "INACAP_USER": "u", "INACAP_PASS": "p"}, "si faltan, se agregan"
+    # Una contraseña puede traer de todo; lo escrito tiene que volver igual.
+    for pw in ("a=b", "x#y", " espacios ", '"dobles"', "'simples'", "m\"i'x=#", "ñandú"):
+        leido = _parse_env(_with_credentials(None, plantilla, "u", pw))["INACAP_PASS"]
+        assert leido == pw, (pw, leido)
+    assert _parse_env("K='v'\nJ=\"w\"\nL=x") == {"K": "v", "J": "w", "L": "x"}
     _resolve_test()
     _gitignore_test()
     print("Verificaciones OK")
@@ -1714,6 +1809,8 @@ if __name__ == "__main__":
     ap.add_argument("--login", action="store_true", help="fuerza ahora el inicio de sesión automático")
     ap.add_argument("--retry-unsupported", action="store_true",
                     help="reintenta las actividades en espera por formato no soportado")
+    ap.add_argument("--setup", action="store_true",
+                    help="pide y prueba tu usuario y contraseña de INACAP")
     ap.add_argument("--check", action="store_true",
                     help="revisa la instalación y muestra qué falta")
     ap.add_argument("--install-schedule", action="store_true",
@@ -1727,7 +1824,9 @@ if __name__ == "__main__":
         self_test()
     elif args.login:
         print("Sesión iniciada, cookie guardada." if refresh_cookie()
-              else "No se pudo iniciar sesión — revisa INACAP_USER/INACAP_PASS en el .env.")
+              else "No se pudo iniciar sesión — corrige tus credenciales con archiver.py --setup.")
+    elif args.setup:
+        setup()
     elif args.check:
         check()
     elif args.install_schedule:
