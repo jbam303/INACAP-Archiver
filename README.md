@@ -352,6 +352,13 @@ cuaderno y no en total, un ramo completo entra sin problema.
 
 ## 🖥️ Uso
 
+Si instalaste con el comando de una línea, usa `inacap` en lugar de
+`python3 archiver.py` (por ejemplo, `inacap --discover`). La sincronización con
+NotebookLM corre sola al final de cada descarga; para lanzarla a mano usa el
+Python del programa: `~/INACAP-Archiver/.venv/bin/python
+~/INACAP-Archiver/notebooklm_sync.py` (en Windows,
+`~\INACAP-Archiver\.venv\Scripts\python.exe ~\INACAP-Archiver\notebooklm_sync.py`).
+
 ```bash
 python3 archiver.py --discover     # lista lo encontrado, sin descargar
 python3 archiver.py                # descarga lo nuevo (+ respaldo a Drive si está activo)
