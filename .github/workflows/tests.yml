@@ -18,7 +18,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest, python: "3.9" }
+          # 3.9 en ubuntu-24.04 fijo: ubuntu-latest pasó a 26.04, que no tiene
+          # build de 3.9, y setup-python fallaba antes de correr las pruebas.
+          - { os: ubuntu-24.04, python: "3.9" }
           - { os: ubuntu-latest, python: "3.13" }
           - { os: windows-latest, python: "3.9" }
           - { os: windows-latest, python: "3.13" }
@@ -31,9 +33,9 @@ jobs:
           - { os: macos-latest, python: "3.13" }
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
 
