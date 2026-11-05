@@ -19,9 +19,10 @@ Auth map (verified):
 Usage:
   python3 archiver.py --discover      # list resources, resolve URLs, no download
   python3 archiver.py                  # discover + download new resources
-  python3 archiver.py --setup         # ask for and test the INACAP credentials
+  python3 archiver.py --setup         # credentials, then optional Telegram/NotebookLM
   python3 archiver.py --install-schedule  # register the daily 08:00 run
   python3 archiver.py --bot            # serve Telegram commands (long-poll)
+  python3 archiver.py --uninstall      # remove schedules, bot and personal data
   python3 archiver.py --self-test      # run offline parser checks
 """
 from __future__ import annotations
@@ -188,7 +189,7 @@ def make_session():
         if not refresh_cookie():
             sys.exit(
                 "Todavía no hay sesión de Moodle. Configura tus credenciales con "
-                "archiver.py --setup (recomendado), o exporta la cookie a "
+                f"{_cmd()} --setup (recomendado), o exporta la cookie a "
                 "aai.curlrc. Ver README."
             )
         cookie = load_cookie("aai.curlrc")
@@ -223,13 +224,37 @@ def _load_env() -> dict:
     return _parse_env(path.read_text(encoding="utf-8")) if path.exists() else {}
 
 
-def _with_credentials(current: str | None, template: str, user: str, password: str) -> str:
-    """The .env text with INACAP_USER/INACAP_PASS set and every other line kept.
+def _command_name(launcher_text: str | None, root: str) -> str:
+    """How hints should tell the student to run this program.
+
+    `inacap` exists only when an installer wrote a launcher for this very
+    folder; a manual install or a git checkout runs the script itself.
+    """
+    if not launcher_text:
+        return "python3 archiver.py"
+    # The .cmd launcher says %USERPROFILE%; expand it like cmd.exe would.
+    text = re.sub(r"%(\w+)%", lambda m: os.environ.get(m.group(1), m.group(0)), launcher_text)
+    if os.path.normcase(root) in os.path.normcase(text):
+        return "inacap"
+    return "python3 archiver.py"
+
+
+def _cmd() -> str:
+    """_command_name for this install."""
+    launcher = _launcher(pathlib.Path.home(), os.name == "nt", os.environ.get("XDG_BIN_HOME", ""))
+    try:
+        text = launcher.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        text = None
+    return _command_name(text, str(ROOT.resolve()))
+
+
+def _with_env(current: str | None, template: str, values: dict) -> str:
+    """The .env text with `values` set and every other line kept.
 
     `current` is None when there is no .env yet; then the template is the start.
     Values are always double-quoted, which _parse_env undoes exactly.
     """
-    values = {"INACAP_USER": user, "INACAP_PASS": password}
     out, written = [], set()
     for line in (template if current is None else current).splitlines():
         key = line.split("=", 1)[0].strip()
@@ -241,15 +266,28 @@ def _with_credentials(current: str | None, template: str, user: str, password: s
     return "\n".join(out) + "\n"
 
 
-def _yes(prompt: str) -> bool:
-    return input(prompt).strip().lower() in ("", "s", "si", "sí")
+def _save_env(values: dict) -> None:
+    """Set these keys in the .env (created from .env.example if missing)."""
+    env_path, example = ROOT / ".env", ROOT / ".env.example"
+    template = example.read_text(encoding="utf-8") if example.exists() else ""
+    current = env_path.read_text(encoding="utf-8") if env_path.exists() else None
+    env_path.write_text(_with_env(current, template, values), encoding="utf-8")
+    env_path.chmod(0o600)
+
+
+def _yes(prompt: str, default: bool = True) -> bool:
+    answer = input(prompt).strip().lower()
+    return answer in ("s", "si", "sí") or (default and not answer)
 
 
 def setup() -> None:
-    """Ask for the INACAP credentials, save them to .env and try them out."""
+    """Ask for the INACAP credentials, save them to .env and try them out.
+
+    Then offer the optional extras, one by one.
+    """
     import getpass
 
-    env_path, example = ROOT / ".env", ROOT / ".env.example"
+    example = ROOT / ".env.example"
     template = example.read_text(encoding="utf-8") if example.exists() else ""
     env = _load_env()
     user = env.get("INACAP_USER", "")
@@ -267,10 +305,7 @@ def setup() -> None:
             if not user or not password:
                 print("Faltó el usuario o la contraseña.\n")
                 continue
-            current = env_path.read_text(encoding="utf-8") if env_path.exists() else None
-            env_path.write_text(_with_credentials(current, template, user, password),
-                                encoding="utf-8")
-            env_path.chmod(0o600)
+            _save_env({"INACAP_USER": user, "INACAP_PASS": password})
         try:
             ok = refresh_cookie()
         except Exception as e:  # no network, INACAP's page changed, ...
@@ -278,11 +313,125 @@ def setup() -> None:
             ok = False
         if ok:
             print("✓ Inicio de sesión correcto. Credenciales guardadas.")
-            return
+            break
         print("✗ No se pudo iniciar sesión. Revisa el usuario y la contraseña.")
         if not _yes("¿Intentar de nuevo? [S/n] "):
-            sys.exit("Sin credenciales válidas. Para reintentar: archiver.py --setup")
+            sys.exit(f"Sin credenciales válidas. Para reintentar: {_cmd()} --setup")
         keep = False
+
+    print(f"\nExtras opcionales (puedes activarlos después con: {_cmd()} --setup)")
+    for extra in (_setup_telegram, _setup_notebooklm):
+        print()
+        try:
+            extra()
+        except Exception as e:  # one extra failing must not cost the others
+            print(f"✗ No se pudo completar ({type(e).__name__}: {_redact(str(e))}). "
+                  f"Puedes reintentarlo con: {_cmd()} --setup")
+
+
+def _offer(question: str, configured: str) -> bool:
+    """Ask before an optional extra; default no. Re-runs offer to redo it."""
+    if configured:
+        print(configured)
+        return _yes("¿Configurarlo de nuevo? [s/N] ", default=False)
+    return _yes(f"{question} [s/N] ", default=False)
+
+
+def _setup_telegram() -> None:
+    """Create-a-bot walkthrough: token, chat id, test message, bot service."""
+    conf = _telegram_conf()
+    if not _offer("¿Quieres avisos de material nuevo y pedir descargas por Telegram?",
+                  conf and "Telegram ya está configurado."):
+        return
+    print("Crea tu bot (toma un minuto):\n"
+          "  1. En Telegram, busca a @BotFather y abre la conversación.\n"
+          "  2. Envíale /newbot y responde lo que pregunta: un nombre y un usuario\n"
+          "     que termine en \"bot\" (por ejemplo, ana_inacap_bot).\n"
+          "  3. Te responde con un token parecido a 123456789:AAH...; cópialo.")
+    while True:
+        token = input("Pega aquí el token (Enter para omitir): ").strip()
+        if not token:
+            return
+        me = _telegram_call(token, "getMe")
+        if me.get("ok"):
+            break
+        print(f"Telegram no aceptó ese token ({me.get('description')}). Revisa que esté completo.")
+    bot_name = me["result"].get("username")
+    # A running bot polls getUpdates too, and would swallow the message we need.
+    # Whatever happens next (cancel, error, Ctrl-C), a bot that was running is
+    # put back; after a successful setup it starts with the new settings.
+    was_running = _bot_service(start=False)
+    done = False
+    try:
+        chat = ""
+        while not chat:
+            if input(f"Ahora escríbele cualquier mensaje a @{bot_name} en Telegram y luego "
+                     "presiona Enter aquí (o escribe salir): ").strip().lower() == "salir":
+                print("Telegram no se configuró.")
+                return
+            # Newest first: on a reused bot, an old chat may still be in the queue.
+            for chat_id, name, text in reversed(
+                    _private_chats(_telegram_call(token, "getUpdates"))):
+                if _yes(f"¿Eres tú, {name}, que escribiste «{text}»? [s/N] ", default=False):
+                    chat = chat_id
+                    break
+            else:
+                print("Todavía no llega tu mensaje. Revisa que se lo hayas enviado a "
+                      f"@{bot_name} desde tu chat personal y vuelve a intentarlo.")
+        _save_env({"TELEGRAM_TOKEN": token, "TELEGRAM_CHAT_ID": chat})
+        done = True
+        sent = _telegram_call(token, "sendMessage", {
+            "chat_id": chat,
+            "text": "✓ INACAP Archiver conectado. Aquí te avisaré del material nuevo."})
+        if sent.get("ok"):
+            print("✓ Telegram listo: te envié un mensaje de prueba.")
+        else:
+            print("✗ Telegram quedó guardado, pero no aceptó el mensaje de prueba "
+                  f"({sent.get('description')}).")
+    finally:
+        if done or was_running:
+            _bot_service(start=True)
+
+
+def _notebooklm_home(home: pathlib.Path | None = None) -> pathlib.Path:
+    """Where notebooklm-py keeps the Google login (its paths.get_home_dir)."""
+    return pathlib.Path(os.environ.get("NOTEBOOKLM_HOME")
+                        or (home or pathlib.Path.home()) / ".notebooklm").expanduser()
+
+
+def _setup_notebooklm() -> None:
+    """Install the notebooklm CLI into this Python and run its login."""
+    import shutil
+    import subprocess
+
+    cli = _notebooklm_cli(os.environ.get("PATH", ""), sys.executable)
+    logged_in = cli and any(_notebooklm_home().rglob("storage_state.json"))
+    if not _offer("¿Quieres subir tu material a NotebookLM (un cuaderno por ramo)?",
+                  logged_in and "NotebookLM ya está configurado."):
+        return
+    if not cli:
+        print("Instalando notebooklm-py ...", flush=True)
+        package = "notebooklm-py[browser]"
+        # Same places the installer looks: uv may not be on this PATH yet.
+        uv = shutil.which("uv", path=os.pathsep.join(
+            p for p in (os.environ.get("XDG_BIN_HOME"), str(pathlib.Path.home() / ".local/bin"),
+                        _tool_path(os.environ.get("PATH", ""))) if p))
+        # A uv-made venv has no pip, so pip is only the fallback for no uv at all.
+        if uv:
+            rc = subprocess.run([uv, "pip", "install", "--python", sys.executable,
+                                 package]).returncode
+            if rc != 0:
+                raise RuntimeError(f"uv no pudo instalar notebooklm-py (salió con {rc}); "
+                                   "revisa el mensaje de arriba")
+        else:
+            subprocess.run([sys.executable, "-m", "pip", "install", package], check=True)
+        cli = _notebooklm_cli(os.environ.get("PATH", ""), sys.executable)
+        if not cli:
+            raise RuntimeError("se instaló notebooklm-py pero no encuentro su CLI")
+    print("Se abrirá un navegador: inicia sesión con tu cuenta de Google y espera\n"
+          "a que cargue NotebookLM.")
+    subprocess.run([cli, "login"], check=True)
+    print("✓ NotebookLM listo: cada material nuevo se sube solo.")
 
 
 # Moodle cookies worth persisting; the rest (analytics) are dropped.
@@ -773,10 +922,11 @@ def _run(discover_only: bool, retry_unsupported: bool = False) -> str:
                 resources = discover(session)
             except SessionExpired:
                 raise SessionExpired(
-                    "el inicio automático falló — si cambiaste tu contraseña, ejecuta archiver.py --setup")
+                    "el inicio automático falló — si cambiaste tu contraseña, ejecuta "
+                    f"{_cmd()} --setup")
         else:
             raise SessionExpired(
-                "configura tus credenciales con archiver.py --setup, o actualiza "
+                f"configura tus credenciales con {_cmd()} --setup, o actualiza "
                 "aai.curlrc")
     manifest = load_manifest()
     new = pending(resources, manifest, retry_unsupported)
@@ -890,13 +1040,15 @@ def _notebooklm_cli(path_env: str, python: str) -> str:
 
     Mirrors notebooklm_sync._cli_path, fallback included: pip puts the CLI next
     to the interpreter inside a venv or pyenv, and launchd runs the daily job
-    with a minimal PATH where `which` alone would never find it.
+    with a minimal PATH where `which` alone would never find it. On Windows the
+    venv's CLI is Scripts\\notebooklm.exe.
     """
     import shutil
 
-    beside = pathlib.Path(python).parent / "notebooklm"
-    if beside.exists():
-        return str(beside)
+    for name in ("notebooklm", "notebooklm.exe"):
+        beside = pathlib.Path(python).parent / name
+        if beside.exists():
+            return str(beside)
     return shutil.which("notebooklm", path=_tool_path(path_env)) or ""
 
 
@@ -965,31 +1117,36 @@ SCHEDULE_LABEL = "com.inacap.archiver"
 SCHEDULE_HOUR = 8
 
 
-def _schedule_plist(python: str, script: str) -> str:
-    """A launchd agent that runs the archiver daily at SCHEDULE_HOUR."""
-    log = str(ROOT / "archiver.log")
+def _plist(label: str, argv: list, log: str, when: str) -> str:
+    """A launchd agent running argv, logging to log; `when` is its trigger."""
     e = html.escape  # a path may hold &, < or > — unescaped they break the XML
+    args = "\n".join(f"    <string>{e(a)}</string>" for a in argv)
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>{e(SCHEDULE_LABEL)}</string>
+  <key>Label</key><string>{e(label)}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>{e(python)}</string>
-    <string>{e(script)}</string>
+{args}
   </array>
-  <key>StartCalendarInterval</key>
-  <dict>
-    <key>Hour</key><integer>{SCHEDULE_HOUR}</integer>
-    <key>Minute</key><integer>0</integer>
-  </dict>
+{when}
   <key>StandardOutPath</key><string>{e(log)}</string>
   <key>StandardErrorPath</key><string>{e(log)}</string>
 </dict>
 </plist>
 """
+
+
+def _schedule_plist(python: str, script: str) -> str:
+    """A launchd agent that runs the archiver daily at SCHEDULE_HOUR."""
+    return _plist(SCHEDULE_LABEL, [python, script], str(ROOT / "archiver.log"), f"""\
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>{SCHEDULE_HOUR}</integer>
+    <key>Minute</key><integer>0</integer>
+  </dict>""")
 
 
 def _schedule_systemd(python: str, script: str) -> tuple[str, str]:
@@ -1068,6 +1225,145 @@ def install_schedule() -> None:
         sys.exit(f"No se pudo programar la ejecución (salida {rc}). Ver README.")
 
 
+# The Telegram bot as a background service, started at login. Same split as
+# the daily run: pure renderers, and _bot_service() as the thin shell.
+BOT_LABEL = "com.inacap.bot"
+BOT_UNIT = "inacap-bot.service"
+
+
+def _bot_plist(python: str, script: str) -> str:
+    """The bot's launchd agent: starts at login, restarted if it dies."""
+    return _plist(BOT_LABEL, [python, script, "--bot"], str(ROOT / "bot.log"), """\
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>60</integer>""")
+
+
+def _bot_systemd(python: str, script: str) -> str:
+    """The bot's systemd user service."""
+    log = str(ROOT / "bot.log")
+    return f"""[Unit]
+Description=Bot de Telegram del archivador INACAP
+
+[Service]
+ExecStart="{python}" "{script}" --bot
+Restart=on-failure
+RestartSec=60
+StandardOutput=append:{log}
+StandardError=append:{log}
+
+[Install]
+WantedBy=default.target
+"""
+
+
+def _bot_task_xml(pythonw: str, script: str, user: str) -> str:
+    """The bot's Task Scheduler definition, for `schtasks /create /xml`.
+
+    Not plain `schtasks /sc onlogon`: that trigger is for any user, which is
+    reported to need an elevated prompt, and its defaults stop the task after
+    72 hours and whenever the laptop runs on battery. A logon trigger bound to
+    this user, with those limits off, is what Register-ScheduledTask would make.
+    pythonw.exe keeps a console window from staying open.
+    """
+    e = html.escape
+    return f"""<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <UserId>{e(user)}</UserId>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>{e(user)}</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Enabled>true</Enabled>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{e(pythonw)}</Command>
+      <Arguments>{e(f'"{script}" --bot')}</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+"""
+
+
+def _run_quiet(argv: list) -> int:
+    """Run a scheduler command, output discarded; -1 when it is not installed."""
+    import subprocess
+
+    try:
+        return subprocess.run(argv, capture_output=True).returncode
+    except OSError:
+        return -1
+
+
+def _bot_service(start: bool) -> bool:
+    """Stop and unregister the bot service; with start, register it and start it.
+
+    Returns whether a bot service was registered before, so a setup that stops
+    it can put it back if the student cancels.
+    """
+    call = _run_quiet
+    home = pathlib.Path.home()
+    commands, files = _service_teardown(sys.platform, home, bot_only=True)
+    registered = (any(f.exists() for f in files) if files
+                  else call(["schtasks", "/query", "/tn", BOT_LABEL]) == 0)
+    for argv in commands:
+        call(argv)
+    for f in files:
+        with contextlib.suppress(OSError):
+            f.unlink()
+    if not start:
+        return registered
+
+    python, script = sys.executable, str(pathlib.Path(__file__).resolve())
+    if sys.platform == "darwin":
+        target = home / "Library/LaunchAgents" / f"{BOT_LABEL}.plist"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(_bot_plist(python, script), encoding="utf-8")
+        rc = call(["launchctl", "load", str(target)])
+    elif sys.platform == "win32":
+        pythonw = str(pathlib.Path(python).with_name("pythonw.exe"))
+        user = "\\".join(p for p in (os.environ.get("USERDOMAIN"),
+                                     os.environ.get("USERNAME")) if p)
+        xml = ROOT / "bot-task.xml"
+        xml.write_text(_bot_task_xml(pythonw, script, user), encoding="utf-16")
+        try:
+            rc = (call(["schtasks", "/create", "/f", "/tn", BOT_LABEL, "/xml", str(xml)])
+                  or call(["schtasks", "/run", "/tn", BOT_LABEL]))
+        finally:
+            xml.unlink()
+    else:
+        import shutil
+
+        if not shutil.which("systemctl"):
+            print(f"Este sistema no tiene systemd: inicia el bot a mano con: {_cmd()} --bot")
+            return registered
+        unit = home / ".config/systemd/user" / BOT_UNIT
+        unit.parent.mkdir(parents=True, exist_ok=True)
+        unit.write_text(_bot_systemd(python, script), encoding="utf-8")
+        call(["systemctl", "--user", "daemon-reload"])
+        rc = call(["systemctl", "--user", "enable", "--now", BOT_UNIT])
+    if rc == 0:
+        print("✓ El bot atiende tus comandos (/bajar, /estado) mientras el equipo esté encendido.")
+    else:
+        print(f"✗ No se pudo dejar el bot en segundo plano (salida {rc}). "
+              f"Puedes iniciarlo a mano con: {_cmd()} --bot")
+    return registered
+
+
 # --- Telegram ---------------------------------------------------------------
 # Optional. Set TELEGRAM_TOKEN and TELEGRAM_CHAT_ID in .env (see README).
 # Sending only needs an outbound POST — no server, no webhook, no open port.
@@ -1095,19 +1391,13 @@ def notify(text: str, chat_id: str | None = None) -> None:
     conf = _telegram_conf()
     if not conf or not text:
         return
-    import requests
-
     token, default_chat = conf
     if len(text) > _MAX_MESSAGE:
         text = text[:_MAX_MESSAGE] + "\n… (recortado)"
     try:
-        requests.post(
-            _API.format(token=token, method="sendMessage"),
-            json={"chat_id": chat_id or default_chat, "text": text},
-            timeout=30,
-        )
+        _telegram_call(token, "sendMessage", {"chat_id": chat_id or default_chat, "text": text})
     except Exception as e:  # a failed notification must never sink a run
-        print(f"No se pudo avisar por Telegram: {e}")
+        print(f"No se pudo avisar por Telegram: {_redact(str(e))}")
 
 
 def _chat_ids(payload: dict) -> list[tuple[str, str]]:
@@ -1131,15 +1421,52 @@ def _chat_ids(payload: dict) -> list[tuple[str, str]]:
     return list(out.items())
 
 
-def telegram_setup() -> None:
-    """Print the chat id to paste into .env, read from the bot's own updates."""
+def _printable(text: str) -> str:
+    """Text without control characters (escape sequences, bidi overrides)."""
+    import unicodedata
+
+    return "".join(c for c in text if unicodedata.category(c)[0] != "C")
+
+
+def _private_chats(payload: dict) -> list[tuple[str, str, str]]:
+    """(chat_id, name, last text) of each private chat that wrote, latest last.
+
+    For --setup to recognise the student's own chat: groups and channels are
+    never offered, and names and texts, which anyone can choose, are made safe
+    to print.
+    """
+    out: dict[str, tuple[str, str]] = {}
+    for update in payload.get("result", []):
+        msg = update.get("message") or {}
+        chat = msg.get("chat") or {}
+        if chat.get("type") != "private" or "id" not in chat:
+            continue
+        name = " ".join(p for p in (chat.get("first_name"), chat.get("last_name")) if p) \
+            or chat.get("username") or "sin nombre"
+        out.pop(str(chat["id"]), None)  # re-insert: order by latest message
+        out[str(chat["id"])] = (_printable(name), _printable(msg.get("text") or "")[:60])
+    return [(cid, name, text) for cid, (name, text) in out.items()]
+
+
+def _redact(text: str) -> str:
+    """Hide bot tokens: request errors quote the URL, which carries the token."""
+    return re.sub(r"\d{5,}:[A-Za-z0-9_-]{30,}", "<token>", text)
+
+
+def _telegram_call(token: str, method: str, payload: dict | None = None) -> dict:
+    """A Bot API call's JSON; {"ok": False, ...} when Telegram refuses it."""
     import requests
 
+    return requests.post(_API.format(token=token, method=method),
+                         json=payload or {}, timeout=30).json()
+
+
+def telegram_setup() -> None:
+    """Print the chat id to paste into .env, read from the bot's own updates."""
     token = _load_env().get("TELEGRAM_TOKEN")
     if not token:
         sys.exit("Falta TELEGRAM_TOKEN en el .env. Pídeselo a @BotFather.")
-    r = requests.get(_API.format(token=token, method="getUpdates"), timeout=30)
-    payload = r.json()
+    payload = _telegram_call(token, "getUpdates")
     if not payload.get("ok"):
         sys.exit(f"Telegram rechazó la consulta: {payload.get('description')}")
 
@@ -1261,12 +1588,12 @@ def _check_deps() -> tuple:
 def _check_credentials() -> tuple:
     env = _load_env()
     if not (ROOT / ".env").exists():
-        return FAIL, "no existe .env — ejecuta archiver.py --setup"
+        return FAIL, f"no existe .env — ejecuta {_cmd()} --setup"
     if env.get("INACAP_USER") and env.get("INACAP_PASS"):
         return OK, f"INACAP_USER={_mask(env['INACAP_USER'])}"
     if (ROOT / "aai.curlrc").exists():
         return WARN, "sin credenciales; se usa la cookie manual de aai.curlrc"
-    return FAIL, "faltan INACAP_USER e INACAP_PASS — ejecuta archiver.py --setup"
+    return FAIL, f"faltan INACAP_USER e INACAP_PASS — ejecuta {_cmd()} --setup"
 
 
 def _check_moodle() -> tuple:
@@ -1277,7 +1604,7 @@ def _check_moodle() -> tuple:
         return FAIL, str(e).splitlines()[0]
     except SessionExpired:
         return (OK, "la sesión estaba vencida y se renovó sola") if refresh_cookie() \
-            else (FAIL, "no se pudo iniciar sesión — corrígelas con archiver.py --setup")
+            else (FAIL, f"no se pudo iniciar sesión — corrígelas con {_cmd()} --setup")
     except Exception as e:
         return FAIL, f"{type(e).__name__}: {e}"
 
@@ -1323,7 +1650,7 @@ def _check_schedule() -> tuple:
                  / ".config/systemd/user/inacap-archiver.timer").exists()
     if listo:
         return OK, f"programada a las 0{SCHEDULE_HOUR}:00"
-    return WARN, "sin programar — usa: python3 archiver.py --install-schedule"
+    return WARN, f"sin programar — usa: {_cmd()} --install-schedule"
 
 
 def check() -> None:
@@ -1435,7 +1762,7 @@ def bot() -> None:
                 sys.exit(f"Telegram rechazó la consulta: {payload.get('description')}")
             updates = payload["result"]
         except Exception as e:
-            print(f"consulta fallida: {e}", flush=True)
+            print(f"consulta fallida: {_redact(str(e))}", flush=True)
             time.sleep(15)  # network hiccup or Telegram blip; back off and retry
             continue
         for update in updates:
@@ -1448,6 +1775,204 @@ def bot() -> None:
             if cmd == "/bajar":
                 notify("Buscando novedades…", chat)
             notify(handle(cmd), chat)
+
+
+# --- Uninstall --------------------------------------------------------------
+# What to remove is decided by pure functions (tested in _extras_test);
+# uninstall() only carries it out.
+
+# The repo's top-level entries, i.e. what the installer unpacks into ROOT.
+# _gitignore_test checks it against `git ls-files`.
+_REPO_FILES = (".env.example", ".github", ".gitignore", "LICENSE", "README.md",
+               "archiver.py", "install.ps1", "install.sh", "notebooklm_sync.py",
+               "requirements.txt")
+
+# What notebooklm-py keeps in its home: the per-profile folder, its config, and
+# the pre-profile layout (storage_state.json, its master_token.json sibling,
+# context.json, browser_profile/). Its MCP server's oauth/ is not ours to touch.
+_NOTEBOOKLM_ENTRIES = ("profiles", "config.json", "storage_state.json",
+                       "context.json", "master_token.json", "browser_profile")
+
+# Personal data the archiver leaves in ROOT, all of it gitignored.
+_PERSONAL = (".env", "*.curlrc", "cookies*.txt", "notebooklm.json",
+             "manifest.json", ".last-run.json", "*.log", ".lock")
+
+
+def _launcher(home: pathlib.Path, windows: bool, xdg_bin: str) -> pathlib.Path:
+    """The `inacap` command the installers write, by the same rule they use."""
+    return pathlib.Path(xdg_bin or home / ".local/bin") / ("inacap.cmd" if windows else "inacap")
+
+
+def _service_teardown(platform: str, home: pathlib.Path,
+                      bot_only: bool = False) -> tuple[list, list]:
+    """(commands, files) that stop and remove the bot, and the daily run too
+    unless bot_only, on this OS."""
+    labels = (BOT_LABEL,) if bot_only else (BOT_LABEL, SCHEDULE_LABEL)
+    if platform == "darwin":
+        files = [home / "Library/LaunchAgents" / f"{label}.plist" for label in labels]
+        return [["launchctl", "unload", str(f)] for f in files], files
+    if platform == "win32":
+        return ([["schtasks", "/end", "/tn", BOT_LABEL]]
+                + [["schtasks", "/delete", "/f", "/tn", label] for label in labels]), []
+    units = (BOT_UNIT,) if bot_only else ("inacap-archiver.timer", BOT_UNIT)
+    unit_dir = home / ".config/systemd/user"
+    extra = () if bot_only else ("inacap-archiver.service",)
+    return ([["systemctl", "--user", "disable", "--now", *units]],
+            [unit_dir / name for name in (*extra, *units)])
+
+
+def _installer_dir(root: pathlib.Path, home: pathlib.Path, names) -> bool:
+    """Whether root is a folder the installer made, and so safe to delete whole.
+
+    A git checkout never is (it is somebody's work), and neither is the home
+    folder or anything containing it, whatever happens to be inside.
+    """
+    return (".git" not in names
+            and {"archiver.py", "requirements.txt", ".venv"} <= set(names)
+            and root != home and root not in home.parents)
+
+
+def _uninstall_plan(names, wipe: bool, delete_archive: bool,
+                    windows: bool) -> tuple[list, list, list]:
+    """(delete now, delete after exit, what stays) for the entries in ROOT.
+
+    Only what this tool put there goes: personal data, and with `wipe` the
+    program too (_REPO_FILES, .venv, __pycache__). INACAP_DIR may be a folder
+    that already held the student's own files; those stay, and so does ROOT.
+    `later` is what this very process keeps locked on Windows: .venv holds the
+    running python.exe.
+    """
+    import fnmatch
+
+    ours = {n for n in names if any(fnmatch.fnmatchcase(n, p) for p in _PERSONAL)}
+    if wipe:
+        ours |= set(_REPO_FILES) | {".venv", "__pycache__"}
+    if delete_archive:
+        ours.add("archive")
+    later = [".venv"] if wipe and windows and ".venv" in names else []
+    return (sorted(n for n in names if n in ours and n not in later), later,
+            sorted(n for n in names if n not in ours))
+
+
+def _deferred_removal(trees: list, files: list, empty_dir: str) -> str:
+    """A cmd line that deletes these once this process has exited (Windows).
+
+    The wait is a ping: `timeout` aborts at once when there is no console.
+    empty_dir gets a plain rmdir, which refuses a folder that is not empty.
+    """
+    steps = (["ping -n 3 127.0.0.1 >nul"] + [f'rmdir /s /q "{d}"' for d in trees]
+             + [f'del /f /q "{f}"' for f in files]
+             + ([f'rmdir "{empty_dir}"'] if empty_dir else []))
+    return f'cmd /c "{" & ".join(steps)}"'
+
+
+def _notebooklm_targets(nlm: pathlib.Path, home: pathlib.Path) -> list:
+    """notebooklm-py's own entries in its home (its paths.py), and nothing else.
+
+    NOTEBOOKLM_HOME can point anywhere, so it is never deleted wholesale, and
+    nothing at all when it resolves to the home folder or above it.
+    """
+    nlm, home = nlm.resolve(), home.resolve()
+    if nlm == home or nlm in home.parents:
+        return []
+    return [nlm / name for name in _NOTEBOOKLM_ENTRIES]
+
+
+def _leftovers(platform: str, home: pathlib.Path) -> str:
+    """What --uninstall cannot remove, and how to do it by hand."""
+    cache = {"darwin": home / "Library/Caches/ms-playwright",
+             "win32": home / "AppData/Local/ms-playwright"}.get(
+                 platform, home / ".cache/ms-playwright")
+    uv = ('uv cache clean; Remove-Item -Recurse "$(uv python dir)", '
+          r'~\.local\bin\uv.exe, ~\.local\bin\uvx.exe' if platform == "win32" else
+          'uv cache clean && rm -rf "$(uv python dir)" ~/.local/bin/uv ~/.local/bin/uvx')
+    return ("Esto no lo borré yo:\n"
+            "  • La copia en tu Google Drive (carpeta INACAP), si activaste el respaldo.\n"
+            "    Bórrala desde drive.google.com si ya no la quieres.\n"
+            "  • Tu bot de Telegram, si creaste uno: envíale /deletebot a @BotFather.\n"
+            "  • El navegador del inicio de sesión (Playwright), que otros programas\n"
+            f"    pueden compartir: {cache}\n"
+            "  • uv, el gestor de Python. Si nada más lo usa:\n"
+            f"      {uv}")
+
+
+def uninstall(root: pathlib.Path = ROOT, home: pathlib.Path | None = None,
+              run=_run_quiet, spawn=None) -> None:
+    """Remove schedules, bot and personal data; the program too if the installer made it.
+
+    root, home and run (the scheduler command runner) are parameters so the
+    self-test can uninstall a temp install without touching this machine.
+    """
+    import shutil
+    import subprocess
+
+    home = home or pathlib.Path.home()
+    archive = root / "archive"
+    windows = sys.platform == "win32"
+    names = [p.name for p in root.iterdir()]
+    wipe = _installer_dir(root.resolve(), home.resolve(), names)
+    print("Esto quita la ejecución diaria y el bot de Telegram, y borra tus credenciales,\n"
+          "sesiones y registros" + (f", junto con el programa ({root})." if wipe else "."))
+    if input('Escribe "si" para continuar: ').strip().lower() not in ("si", "sí"):
+        print("No se borró nada.")
+        return
+    delete_archive = archive.exists() and _yes(
+        f"¿Borrar también tu material descargado ({archive})? [s/N] ", default=False)
+
+    commands, files = _service_teardown(sys.platform, home)
+    for argv in commands:
+        run(argv)
+    now, later, left = _uninstall_plan(names, wipe, delete_archive, windows)
+    nlm = _notebooklm_targets(_notebooklm_home(home), home)
+    targets = files + [root / n for n in now] + nlm
+    launcher = _launcher(home, windows, os.environ.get("XDG_BIN_HOME", ""))
+    if wipe and not windows:  # on Windows it is the .cmd running us: deferred
+        targets.append(launcher)
+    failed = []
+    for p in targets:
+        try:
+            if p.is_dir() and not p.is_symlink():
+                shutil.rmtree(p)
+            elif p.exists() or p.is_symlink():
+                p.unlink()
+        except OSError:
+            failed.append(p)
+    if sys.platform not in ("darwin", "win32"):
+        run(["systemctl", "--user", "daemon-reload"])
+    if nlm:
+        with contextlib.suppress(OSError):  # still holds other things: it stays
+            nlm[0].parent.rmdir()
+    if wipe and not left and not windows:
+        try:
+            root.rmdir()
+        except OSError:
+            failed.append(root)
+    if windows and wipe:
+        cmd = _deferred_removal([str(root / n) for n in later], [str(launcher)],
+                                "" if left else str(root))
+        (spawn or subprocess.Popen)(cmd, cwd=str(home), creationflags=subprocess.DETACHED_PROCESS
+                                    | subprocess.CREATE_NEW_PROCESS_GROUP)
+
+    print("\n✓ Se quitaron la ejecución diaria y el bot, y se borraron tus datos personales.")
+    if wipe and windows:
+        # The deferred removal runs after we exit, so its result is unknown here.
+        pending = root if not left else root / ".venv"
+        print(f"El programa ({root}) termina de borrarse en unos segundos. Si después "
+              f"{pending} sigue ahí, bórrala a mano.")
+    elif wipe:
+        print(f"✓ Se borró el programa ({root}).")
+    elif (root / ".git").exists():
+        print(f"Esta carpeta es un clon de git ({root}): el código no se tocó.")
+    else:
+        print(f"Esta carpeta no la creó el instalador: el programa sigue en {root}.")
+    if archive.exists() and not delete_archive:
+        print(f"Tu material sigue en: {archive}")
+    ajenos = [n for n in left if n != "archive"]
+    if wipe and ajenos:
+        print(f"No toqué lo que no es del programa, que sigue en {root}: {', '.join(ajenos)}")
+    for p in failed:
+        print(f"✗ No se pudo borrar: {p}")
+    print("\n" + _leftovers(sys.platform, home))
 
 
 def self_test() -> None:
@@ -1597,6 +2122,12 @@ def self_test() -> None:
             "the CLI beside the interpreter is what launchd can actually find"
         assert _notebooklm_cli("", str(pathlib.Path(tmp) / "vacio" / "python3")) == "", \
             "no CLI means the sync is skipped, not a failed run"
+        # A Windows venv has Scripts\notebooklm.exe: the bare name never exists
+        # there, and Task Scheduler does not put Scripts on PATH either.
+        scripts = pathlib.Path(tmp) / "Scripts"
+        scripts.mkdir()
+        (scripts / "notebooklm.exe").write_text("")
+        assert _notebooklm_cli("", str(scripts / "python.exe")) == str(scripts / "notebooklm.exe")
 
     # A sync that went fine must not add noise to the Telegram summary, and one
     # that did not must never die inside the log: this is the line that carries
@@ -1695,25 +2226,254 @@ def self_test() -> None:
     # también viven Drive y Telegram, que alguien configuró a mano.
     plantilla = ("# Credenciales\nINACAP_USER=tu-correo@inacapmail.cl\n"
                  "INACAP_PASS=tu-contraseña\n# INACAP_USER=comentado\nDRIVE_REMOTE=\n")
-    nuevo = _with_credentials(None, plantilla, "ana@inacapmail.cl", "secreta")
+    def creds(user, pw):
+        return {"INACAP_USER": user, "INACAP_PASS": pw}
+
+    nuevo = _with_env(None, plantilla, creds("ana@inacapmail.cl", "secreta"))
     assert _parse_env(nuevo) == {"INACAP_USER": "ana@inacapmail.cl",
                                  "INACAP_PASS": "secreta", "DRIVE_REMOTE": ""}, nuevo
     assert "# Credenciales" in nuevo and "# INACAP_USER=comentado" in nuevo, nuevo
     assert "tu-contraseña" not in nuevo, "el placeholder se reemplaza"
     actual = "TELEGRAM_TOKEN=123:abc\nINACAP_USER=vieja\nINACAP_PASS=vieja\n"
-    env = _parse_env(_with_credentials(actual, plantilla, "ana", "nueva"))
+    env = _parse_env(_with_env(actual, plantilla, creds("ana", "nueva")))
     assert env == {"TELEGRAM_TOKEN": "123:abc", "INACAP_USER": "ana",
                    "INACAP_PASS": "nueva"}, "con .env existente no se usa la plantilla"
-    assert _parse_env(_with_credentials("A=1", "", "u", "p")) == \
+    assert _parse_env(_with_env("A=1", "", creds("u", "p"))) == \
         {"A": "1", "INACAP_USER": "u", "INACAP_PASS": "p"}, "si faltan, se agregan"
     # Una contraseña puede traer de todo; lo escrito tiene que volver igual.
     for pw in ("a=b", "x#y", " espacios ", '"dobles"', "'simples'", "m\"i'x=#", "ñandú"):
-        leido = _parse_env(_with_credentials(None, plantilla, "u", pw))["INACAP_PASS"]
+        leido = _parse_env(_with_env(None, plantilla, creds("u", pw)))["INACAP_PASS"]
         assert leido == pw, (pw, leido)
     assert _parse_env("K='v'\nJ=\"w\"\nL=x") == {"K": "v", "J": "w", "L": "x"}
+    # Los extras de --setup escriben sus claves con la misma función, sin tocar
+    # las credenciales que ya estaban.
+    tg = _parse_env(_with_env("INACAP_USER=a\nTELEGRAM_TOKEN=\n", "",
+                              {"TELEGRAM_TOKEN": "1:x", "TELEGRAM_CHAT_ID": "9"}))
+    assert tg == {"INACAP_USER": "a", "TELEGRAM_TOKEN": "1:x", "TELEGRAM_CHAT_ID": "9"}, tg
+    _extras_test()
     _resolve_test()
     _gitignore_test()
     print("Verificaciones OK")
+
+
+def _extras_test() -> None:
+    """--setup extras and --uninstall: everything decided without touching the machine."""
+    import tempfile
+
+    # pythonw.exe (the Windows bot task) starts with no stdout/stderr at all.
+    guardado = sys.stdout
+    sys.stdout = None
+    try:
+        _utf8_stdio()
+    finally:
+        sys.stdout = guardado
+
+    # The bot runs at login and must come back if it dies.
+    plist = _bot_plist("/v/bin/python", "/R&D/archiver.py")
+    assert "<string>com.inacap.bot</string>" in plist, plist
+    assert "<string>--bot</string>" in plist and "R&amp;D" in plist, plist
+    assert "<key>RunAtLoad</key><true/>" in plist and "<key>KeepAlive</key><true/>" in plist
+    assert "StartCalendarInterval" not in plist, "el bot no es una tarea diaria"
+    assert "StartCalendarInterval" in _schedule_plist("/p", "/a.py"), "la diaria sigue igual"
+    unit = _bot_systemd("/v/bin/python", "/a b/archiver.py")
+    assert 'ExecStart="/v/bin/python" "/a b/archiver.py" --bot' in unit, unit
+    assert "WantedBy=default.target" in unit and "Restart=" in unit, unit
+    xml = _bot_task_xml(r"C:\a b\pythonw.exe", r"C:\R&D\archiver.py", "PC\\José")
+    assert r"<Command>C:\a b\pythonw.exe</Command>" in xml, xml
+    assert r"&quot;C:\R&amp;D\archiver.py&quot; --bot" in xml, xml
+    assert "<UserId>PC\\José</UserId>" in xml, "sin usuario el disparador exige admin"
+    assert "<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>" in xml, "si no, lo mata a las 72 h"
+    assert "<StopIfGoingOnBatteries>false" in xml, "un notebook sin cargador también"
+
+    # The launcher the installers write, and where --uninstall looks for it.
+    home = pathlib.Path("/Users/ana")
+    assert _launcher(home, False, "") == home / ".local/bin/inacap"
+    assert _launcher(home, True, "") == home / ".local/bin/inacap.cmd"
+    assert _launcher(home, False, "/x") == pathlib.Path("/x/inacap"), "respeta XDG_BIN_HOME"
+
+    # Schedules and the bot, per OS. Unloading first stops what is running.
+    agents = home / "Library/LaunchAgents"
+    cmds, files = _service_teardown("darwin", home)
+    assert ["launchctl", "unload", str(agents / "com.inacap.bot.plist")] in cmds, cmds
+    assert set(files) == {agents / "com.inacap.bot.plist", agents / "com.inacap.archiver.plist"}
+    cmds, files = _service_teardown("win32", home)
+    assert cmds.index(["schtasks", "/end", "/tn", "com.inacap.bot"]) < \
+        cmds.index(["schtasks", "/delete", "/f", "/tn", "com.inacap.bot"]), "detener antes de borrar"
+    assert ["schtasks", "/delete", "/f", "/tn", "com.inacap.archiver"] in cmds and files == []
+    cmds, files = _service_teardown("linux", home)
+    assert ["systemctl", "--user", "disable", "--now", "inacap-archiver.timer",
+            "inacap-bot.service"] in cmds, cmds
+    assert len(files) == 3, files
+    # Setup stops only the bot (it would swallow the chat-id message): reuse the
+    # uninstall teardown, restricted to the bot.
+    cmds, files = _service_teardown("darwin", home, bot_only=True)
+    assert cmds == [["launchctl", "unload", str(agents / "com.inacap.bot.plist")]], cmds
+    assert files == [agents / "com.inacap.bot.plist"], files
+    cmds, files = _service_teardown("win32", home, bot_only=True)
+    assert ["schtasks", "/delete", "/f", "/tn", "com.inacap.archiver"] not in cmds, cmds
+    cmds, files = _service_teardown("linux", home, bot_only=True)
+    assert cmds == [["systemctl", "--user", "disable", "--now", "inacap-bot.service"]], cmds
+    assert [f.name for f in files] == ["inacap-bot.service"], files
+
+    # Anyone who guesses the bot's name can message it: only private chats are
+    # offered, ordered by their latest message, with what they wrote, and names
+    # cannot smuggle terminal control sequences.
+    updates = {"result": [
+        {"message": {"chat": {"id": 1, "type": "private", "first_name": "Ana"}, "text": "hola"}},
+        {"message": {"chat": {"id": 9, "type": "group", "title": "Grupo"}, "text": "x"}},
+        {"message": {"chat": {"id": 2, "type": "private", "first_name": "Ev\x1b[2Ja\u202e"},
+                     "text": "soy\nyo"}},
+        {"message": {"chat": {"id": 1, "type": "private", "first_name": "Ana"}, "text": "otra"}},
+        {"edited_message": {"chat": {"id": 3, "type": "private", "first_name": "Ed"}}},
+    ]}
+    assert _private_chats(updates) == [("2", "Ev[2Ja", "soyyo"), ("1", "Ana", "otra")], \
+        _private_chats(updates)
+    assert _private_chats({"result": []}) == []
+
+    # A requests error message carries the URL, and the URL carries the token;
+    # the installer asks students to paste errors into a public issue.
+    url = "https://api.telegram.org/bot123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw/getMe"
+    assert "AAHdq" not in _redact(f"ConnectionError: {url} timed out"), _redact(url)
+    assert _redact("Error a las 12:30, código 404") == "Error a las 12:30, código 404"
+
+    # Hints name the short command only when this install's launcher exists.
+    assert _command_name("#!/bin/sh\nexec '/h/INACAP-Archiver/.venv/bin/python' "
+                         "'/h/INACAP-Archiver/archiver.py' \"$@\"\n",
+                         "/h/INACAP-Archiver") == "inacap"
+    assert _command_name(None, "/h/INACAP-Archiver") == "python3 archiver.py", "sin lanzador"
+    assert _command_name("exec '/otra/archiver.py'", "/h/INACAP-Archiver") == \
+        "python3 archiver.py", "el lanzador es de otra instalación"
+    os.environ["INACAP_TEST_HOME"] = "/h"
+    try:
+        assert _command_name('@"%INACAP_TEST_HOME%/INACAP-Archiver/archiver.py" %*',
+                             "/h/INACAP-Archiver") == "inacap", "el .cmd usa %USERPROFILE%"
+    finally:
+        del os.environ["INACAP_TEST_HOME"]
+
+    _uninstall_run_test()
+
+    # Only a directory the installer made is ever deleted whole.
+    inst = home / "INACAP-Archiver"
+    made = {"archiver.py", "requirements.txt", ".venv", "archive", ".env"}
+    assert _installer_dir(inst, home, made)
+    assert not _installer_dir(inst, home, made | {".git"}), "un clon de desarrollo, jamás"
+    assert not _installer_dir(home, home, made), "nunca la carpeta personal"
+    assert not _installer_dir(pathlib.Path("/Users"), home, made), "ni algo que la contenga"
+    assert not _installer_dir(inst, home, {"archiver.py", ".env"}), "sin .venv no es del instalador"
+
+    nombres = [".env", "aai.curlrc", "virtual.curlrc", "cookies.txt",
+               "manifest.json", ".last-run.json", "archiver.log", "bot.log", ".lock",
+               "notebooklm.json", "archive", ".venv", "archiver.py", ".git",
+               "README.md", ".env.example"]
+    personales = {".env", "aai.curlrc", "virtual.curlrc", "cookies.txt",
+                  "manifest.json", ".last-run.json", "archiver.log", "bot.log", ".lock",
+                  "notebooklm.json"}
+    # `left` is what stays in ROOT; the folder itself goes only if it is empty.
+    now, later, left = _uninstall_plan(nombres, wipe=False, delete_archive=False, windows=False)
+    assert set(now) == personales, set(now) ^ personales
+    assert later == [] and ".git" in left, "de un clon solo salen los datos personales"
+    now, _, _ = _uninstall_plan(nombres, wipe=False, delete_archive=True, windows=True)
+    assert "archive" in now and ".venv" not in now
+    # INACAP_DIR may already hold the student's own files: only ours go.
+    sin_git = [n for n in nombres if n != ".git"] + ["__pycache__"]
+    ajenos = ["Tarea final.docx", "fotos"]
+    now, later, left = _uninstall_plan(sin_git + ajenos, wipe=True, delete_archive=True,
+                                       windows=False)
+    assert {"archiver.py", "README.md", ".venv", "__pycache__", ".env", "archive"} <= set(now), now
+    assert left == ajenos and not set(ajenos) & set(now), "lo ajeno no se toca"
+    now, later, left = _uninstall_plan(sin_git, wipe=True, delete_archive=False, windows=False)
+    assert "archive" not in now and left == ["archive"], "el material se queda"
+    now, later, left = _uninstall_plan(sin_git, wipe=True, delete_archive=True, windows=False)
+    assert left == [] and later == [], "nada que conservar: la carpeta queda vacía"
+    now, later, left = _uninstall_plan(sin_git, wipe=True, delete_archive=True, windows=True)
+    assert ".venv" not in now and later == [".venv"] and left == [], "python.exe bloquea .venv"
+
+    # Windows: .venv goes after this process exits (`timeout` aborts at once
+    # without a console, so the wait is a ping). ROOT itself only with a plain
+    # rmdir, which refuses a folder that still holds anything.
+    raiz = r"C:\Users\José Pérez\INACAP-Archiver"
+    cmd = _deferred_removal([raiz + r"\.venv"], [r"C:\Users\José Pérez\.local\bin\inacap.cmd"],
+                            raiz)
+    assert cmd.startswith('cmd /c "ping -n 3 127.0.0.1 >nul & '), cmd
+    assert f'rmdir /s /q "{raiz}\\.venv"' in cmd, cmd
+    assert r'del /f /q "C:\Users\José Pérez\.local\bin\inacap.cmd"' in cmd, cmd
+    assert cmd.endswith(f'rmdir "{raiz}""') and f'/q "{raiz}"' not in cmd, cmd
+    assert "timeout" not in cmd
+    assert not _deferred_removal([], ["x"], "").endswith('rmdir ""'), "sin carpeta vacía que borrar"
+
+    # notebooklm-py's own entries only, even under an arbitrary NOTEBOOKLM_HOME,
+    # and never in the home folder or above it.
+    with tempfile.TemporaryDirectory() as tmp:
+        casa = pathlib.Path(tmp)
+        nlm = _notebooklm_targets(casa / ".notebooklm", casa)
+        assert {t.name for t in nlm} == {"profiles", "config.json", "storage_state.json",
+                                         "context.json", "master_token.json",
+                                         "browser_profile"}, nlm
+        assert all(t.parent == (casa / ".notebooklm").resolve() for t in nlm), nlm
+        assert _notebooklm_targets(casa, casa) == [], "NOTEBOOKLM_HOME=~ no borra nada"
+        assert _notebooklm_targets(casa / "x" / "..", casa) == [], "se compara ya resuelta"
+        assert _notebooklm_targets(casa.parent, casa) == []
+
+    txt = _leftovers("darwin", home)
+    assert "/deletebot" in txt and "Drive" in txt, txt
+    assert str(home / "Library/Caches/ms-playwright") in txt, txt
+    win = pathlib.Path("C:/Users/ana")
+    assert str(win / "AppData/Local/ms-playwright") in _leftovers("win32", win)
+    assert str(home / ".cache/ms-playwright") in _leftovers("linux", home)
+
+
+def _utf8_stdio() -> None:
+    """Force UTF-8 output, skipping streams that do not exist.
+
+    pythonw.exe, which the Windows bot task runs, starts with stdout and stderr
+    set to None; print() then writes nowhere, but reconfigure() would crash.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if stream is not None:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+
+def _uninstall_run_test() -> None:
+    """uninstall() end to end, on a temp install: no scheduler is ever invoked."""
+    import builtins
+    import io
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        home = pathlib.Path(tmp).resolve() / "casa"
+        root = home / "INACAP-Archiver"
+        for name in (".github", ".venv", "archive"):
+            (root / name).mkdir(parents=True, exist_ok=True)
+        for name in set(_REPO_FILES) - {".github"} | {".env", "aai.curlrc", "Tarea.docx"}:
+            (root / name).write_text("x")
+        (home / ".notebooklm" / "profiles").mkdir(parents=True)
+        (home / ".notebooklm" / "mio.txt").write_text("x")
+        windows = os.name == "nt"
+        launcher = _launcher(home, windows, "")
+        launcher.parent.mkdir(parents=True)
+        launcher.write_text("x")
+
+        calls, spawned, answers = [], [], iter(["si", "s"])
+        saved_env = {k: os.environ.pop(k, None) for k in ("NOTEBOOKLM_HOME", "XDG_BIN_HOME")}
+        saved_input, builtins.input = builtins.input, lambda prompt="": next(answers)
+        try:
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                uninstall(root, home, run=calls.append,
+                          spawn=lambda cmd, **kw: spawned.append(cmd))
+        finally:
+            builtins.input = saved_input
+            os.environ.update({k: v for k, v in saved_env.items() if v is not None})
+
+        left = {p.name for p in root.iterdir()}
+        assert left - {".venv"} == {"Tarea.docx"}, left  # .venv: deferred on Windows
+        assert "Tarea.docx" in out.getvalue(), "lo ajeno se nombra"
+        assert [p.name for p in (home / ".notebooklm").iterdir()] == ["mio.txt"]
+        assert launcher.exists() == windows, "en Windows lo borra el proceso diferido"
+        # Never a real detached process: it would hold the temp dir open on Windows.
+        assert len(spawned) == windows, spawned
+        if windows:
+            assert ".venv" in spawned[0] and str(launcher) in spawned[0], spawned
+        assert calls and all(c[0] in ("launchctl", "schtasks", "systemctl") for c in calls), calls
 
 
 class _FakeSession:
@@ -1794,14 +2554,26 @@ def _gitignore_test() -> None:
     for path in _MUST_KEEP:
         assert not ignored(path), f".gitignore está excluyendo {path}"
 
+    # --uninstall deletes the program by this list, never by "everything in ROOT".
+    # (Deleted but not yet committed files are still listed by git: skip them.)
+    tracked_top = {t.split("/")[0] for t in subprocess.run(
+        ["git", "ls-files"], cwd=ROOT, capture_output=True, text=True).stdout.splitlines()
+        if (ROOT / t).exists()}
+    assert tracked_top == set(_REPO_FILES), tracked_top ^ set(_REPO_FILES)
+    # --uninstall in a checkout deletes by _PERSONAL: it must match nothing tracked.
+    tracked = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True,
+                             text=True).stdout.splitlines()
+    top = sorted({t.split("/")[0] for t in tracked})
+    borraria = _uninstall_plan(top, wipe=False, delete_archive=True, windows=False)[0]
+    assert borraria == [], f"--uninstall borraría archivos versionados: {borraria}"
+
 
 if __name__ == "__main__":
     # Course names carry accents ("Minería de Datos"). A scheduler redirects
     # stdout to a log file, and a redirected stream uses the locale encoding —
     # cp1252 on a Spanish Windows — so printing a course name would crash the
     # run with UnicodeEncodeError. Force UTF-8; a no-op everywhere else.
-    for _stream in (sys.stdout, sys.stderr):
-        _stream.reconfigure(encoding="utf-8", errors="replace")
+    _utf8_stdio()
 
     ap = argparse.ArgumentParser(
         description="Archivador del campus virtual de INACAP.")
@@ -1818,13 +2590,15 @@ if __name__ == "__main__":
     ap.add_argument("--telegram-setup", action="store_true",
                     help="muestra el chat id para poner en el .env")
     ap.add_argument("--bot", action="store_true", help="atiende los comandos de Telegram")
+    ap.add_argument("--uninstall", action="store_true",
+                    help="quita la ejecución diaria, el bot y tus datos de este equipo")
     ap.add_argument("--self-test", action="store_true", help="verificaciones internas, sin conexión")
     args = ap.parse_args()
     if args.self_test:
         self_test()
     elif args.login:
         print("Sesión iniciada, cookie guardada." if refresh_cookie()
-              else "No se pudo iniciar sesión — corrige tus credenciales con archiver.py --setup.")
+              else f"No se pudo iniciar sesión — corrige tus credenciales con {_cmd()} --setup.")
     elif args.setup:
         setup()
     elif args.check:
@@ -1835,6 +2609,8 @@ if __name__ == "__main__":
         telegram_setup()
     elif args.bot:
         bot()
+    elif args.uninstall:
+        uninstall()
     else:
         try:
             summary = run(discover_only=args.discover,

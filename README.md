@@ -106,23 +106,36 @@ la ejecución diaria de las 08:00 y termina con un `--check`.
 Para **actualizar**, ejecuta el mismo comando otra vez. Tu `.env`, tu
 `archive/` y el `manifest.json` no se tocan.
 
-### 🔑 Cambiar tu contraseña
-
-Si cambias tu contraseña de INACAP, vuelve a ejecutar el comando de instalación
-(actualiza y te pregunta de nuevo las credenciales), o solo el asistente:
+El instalador deja el comando `inacap` (abre una terminal nueva para usarlo):
 
 ```bash
-# macOS
-~/INACAP-Archiver/.venv/bin/python ~/INACAP-Archiver/archiver.py --setup
+inacap               # baja tu material ahora
+inacap --setup       # cambia tu contraseña o activa Telegram y NotebookLM
+inacap --check       # revisa que todo esté en orden
+inacap --uninstall   # lo quita todo de este equipo (ver más abajo)
 ```
 
-```powershell
-# Windows (PowerShell)
-~\INACAP-Archiver\.venv\Scripts\python.exe ~\INACAP-Archiver\archiver.py --setup
+### 🔑 Cambiar tu contraseña
+
+```bash
+inacap --setup
 ```
 
 Responde `n` cuando pregunte si mantener las guardadas; prueba el inicio de
-sesión antes de terminar.
+sesión antes de terminar. Volver a ejecutar el comando de instalación también
+te lo pregunta.
+
+### ✨ Extras opcionales
+
+Después de las credenciales, `inacap --setup` ofrece dos extras, uno por uno
+(responde `s` para activarlo o Enter para omitirlo; puedes volver a ejecutarlo
+cuando quieras):
+
+- **Telegram**: te guía para crear tu bot con @BotFather, detecta tu chat solo,
+  te manda un mensaje de prueba y deja el bot funcionando en segundo plano.
+- **NotebookLM**: instala `notebooklm-py` y abre el navegador para iniciar sesión.
+
+Lo que sigue en **Configuración** es la forma manual de hacer lo mismo.
 
 ### Instalación manual
 
@@ -133,6 +146,9 @@ python3 -m pip install -r requirements.txt
 python3 -m playwright install chromium
 python3 archiver.py --setup  # pide tus credenciales y las guarda en el .env
 ```
+
+En una instalación manual no existe el comando `inacap`: donde este README
+dice `inacap`, usa `python3 archiver.py`.
 
 No te saltes el paso de Chromium aunque tengas Google Chrome. El inicio de sesión
 automático usa Chrome si puede, pero al ejecutarse desde el programador de
@@ -147,7 +163,7 @@ Luego programa la ejecución diaria (más abajo) y estará listo.
 
 ### 1. Tus credenciales (es todo lo que necesitas)
 
-El instalador y `archiver.py --setup` lo hacen por ti. Si prefieres a mano,
+El instalador e `inacap --setup` lo hacen por ti. Si prefieres a mano,
 crea un archivo `.env` (incluido en el `.gitignore`, nunca se sube) con tus
 credenciales de INACAP:
 
@@ -211,6 +227,10 @@ rclone config       # nuevo remote → nómbralo "gdrive" → tipo "drive"
 Cuando pregunte por el **scope**, elige `drive.file`. Así rclone **solo puede
 ver y modificar los archivos que él mismo sube**; no tiene acceso al resto de tu
 Drive. Aunque algo fallara, no podría borrar otros archivos.
+
+Si pregunta si seguir usando el `client_id` compartido de rclone, responde que
+sí (`y`): con la respuesta por defecto el remote queda creado pero sin sesión
+iniciada, y el respaldo nunca sube nada.
 
 Después activa el respaldo en tu `.env`:
 
@@ -335,7 +355,7 @@ cuaderno y no en total, un ramo completo entra sin problema.
 ```bash
 python3 archiver.py --discover     # lista lo encontrado, sin descargar
 python3 archiver.py                # descarga lo nuevo (+ respaldo a Drive si está activo)
-python3 archiver.py --setup        # pide, guarda y prueba tu usuario y contraseña
+python3 archiver.py --setup        # tu usuario y contraseña, y los extras opcionales
 python3 archiver.py --login        # fuerza el inicio de sesión automático
 python3 archiver.py --bot          # atiende los comandos de Telegram
 python3 archiver.py --check        # revisa la instalación y muestra qué falta
@@ -343,6 +363,7 @@ python3 archiver.py --self-test    # verificaciones internas, sin conexión
 python3 archiver.py --retry-unsupported   # reintenta lo marcado como no soportado
 python3 archiver.py --install-schedule    # programa la ejecución diaria de las 08:00
 python3 archiver.py --telegram-setup      # muestra el chat id para el .env
+python3 archiver.py --uninstall           # quita la ejecución diaria, el bot y tus datos
 python3 notebooklm_sync.py                # sube el material a NotebookLM
 python3 notebooklm_sync.py --sin-referencias   # solo el material, sin enlaces citados
 python3 notebooklm_sync.py --reintentar-rechazadas  # vuelve a ofrecer lo que NotebookLM rechazó
@@ -363,7 +384,7 @@ Recorre la instalación completa en orden y muestra dónde se corta:
 ```
   ✓  Python            Python 3.11.9
   ✓  Dependencias      requests y playwright instalados
-  ✗  Credenciales      no existe .env — ejecuta archiver.py --setup
+  ✗  Credenciales      no existe .env — ejecuta inacap --setup
   ✗  Sesión de Moodle  Todavía no hay sesión de Moodle...
   ·  Google Drive      desactivado (DRIVE_REMOTE vacío en el .env)
   ·  Telegram          desactivado (sin TELEGRAM_TOKEN o TELEGRAM_CHAT_ID)
@@ -399,18 +420,13 @@ Programado todos los días a las 08:00 -> /Users/tu-usuario/Library/LaunchAgents
 El resto de esta sección explica qué hace ese comando en cada sistema, por si
 prefieres instalarlo a mano o revisar lo que quedó.
 
-### macOS (launchd), a mano
+### macOS (launchd)
 
-Edita las rutas en `com.inacap.archiver.plist` (launchd no expande `~`, así que
-necesita rutas absolutas: la de tu Python y la de esta carpeta). Luego:
-
-```bash
-cp com.inacap.archiver.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.inacap.archiver.plist
-```
-
-Se ejecuta todos los días a las **08:00** y deja el registro en `archiver.log`.
-Si el equipo está suspendido a esa hora, se ejecuta al encenderlo.
+`--install-schedule` escribe el agente en
+`~/Library/LaunchAgents/com.inacap.archiver.plist`, con rutas absolutas (launchd
+no expande `~`), y lo carga. Se ejecuta todos los días a las **08:00** y deja el
+registro en `archiver.log`. Si el equipo está suspendido a esa hora, se ejecuta
+al encenderlo.
 
 ```bash
 launchctl list | grep inacap        # verificar que sigue activo
@@ -474,26 +490,40 @@ schtasks /delete /tn "INACAP Archiver"   # desactivarlo
 
 ### El bot como servicio
 
-Si además quieres que el bot atienda comandos siempre que el equipo esté
-encendido, instala el segundo agente igual que el anterior (también con rutas
-absolutas). Se inicia al entrar a la sesión y launchd lo reinicia si se cae:
-
-```bash
-cp com.inacap.bot.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.inacap.bot.plist
-```
+Al configurar Telegram, `inacap --setup` (o `python3 archiver.py --setup` en una
+instalación manual) deja el bot registrado para que atienda comandos siempre que
+el equipo esté encendido: se inicia al entrar a la sesión y, en macOS, launchd
+lo reinicia si se cae (`~/Library/LaunchAgents/com.inacap.bot.plist`).
 
 El registro queda en `bot.log`. **Solo funciona con el equipo encendido**: el
 bot mantiene una conexión de consulta saliente hacia Telegram, no hay ningún
 servidor escuchando.
 
-En **Linux** es un servicio de usuario con `ExecStart=... archiver.py --bot`,
-`Restart=always` y `WantedBy=default.target` (sin temporizador: se mantiene
-corriendo). En **Windows**, la misma tarea del punto anterior pero con
-`/sc onlogon` en lugar de `/sc daily /st 08:00`, apuntando a `--bot`.
+En **Linux** es el servicio de usuario `inacap-bot.service` (systemd); en
+**Windows**, la tarea `com.inacap.bot` del Programador de tareas, que se inicia
+al entrar a la sesión.
 
 Las dos ejecuciones (la diaria y la de `/bajar`) comparten un archivo de bloqueo
 `.lock`, para que nunca se pisen escribiendo el `manifest.json`.
+
+---
+
+## 🗑️ Desinstalar
+
+```bash
+inacap --uninstall
+```
+
+Pide que escribas `si` para confirmar. Quita la ejecución diaria y el bot, y
+borra tus credenciales, cookies, sesiones (también la de Google de NotebookLM),
+registros y el programa con su carpeta. **Tu material (`archive/`) se queda**
+salvo que respondas que sí a la pregunta aparte; si se queda, te dice dónde.
+
+No toca la copia en tu Google Drive, ni tu bot de Telegram (bórralo enviando
+`/deletebot` a @BotFather), ni las herramientas compartidas (el navegador de
+Playwright y uv): al terminar te dice cómo quitarlas si quieres.
+
+En un clon de git solo borra tus datos personales; el código no se toca.
 
 ---
 
@@ -584,6 +614,12 @@ respuesta rápida, o reintenta y duplica la descarga.
 Si se migra, hay que migrar **todo**, incluida la ejecución diaria: mantener
 estado en dos lugares hace divergir los manifiestos y se descarga material
 repetido.
+
+**Drive como extra de `inacap --setup`.** Se probó y se dejó fuera: el
+`client_id` compartido de rclone deja de funcionar durante 2026, y pedirle a
+cada estudiante que cree su propio cliente en Google Cloud no es realista.
+Podría volver si el proyecto publica su propia app de OAuth de Google (cliente
+de escritorio, scope `drive.file`) y la incluye en el instalador.
 
 ---
 

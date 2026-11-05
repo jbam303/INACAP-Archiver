@@ -314,12 +314,17 @@ def manifest_names() -> dict:
 
 # --- the notebooklm CLI ------------------------------------------------------
 
-def _cli_path() -> str:
-    exe = shutil.which("notebooklm") or str(
-        pathlib.Path(sys.executable).parent / "notebooklm")
-    if not pathlib.Path(exe).exists():
-        sys.exit("Falta el CLI de notebooklm. Instálalo con:\n"
-                 '  python3 -m pip install "notebooklm-py[browser]"')
+def _cli_path(python: str = sys.executable) -> str:
+    """The CLI beside the interpreter first (on Windows, notebooklm.exe), then PATH."""
+    beside = pathlib.Path(python).parent
+    for name in ("notebooklm", "notebooklm.exe"):
+        if (beside / name).exists():
+            return str(beside / name)
+    exe = shutil.which("notebooklm")
+    if not exe:
+        from archiver import _cmd  # inacap only where its launcher exists
+
+        sys.exit(f"Falta el CLI de notebooklm. Actívalo con: {_cmd()} --setup")
     return exe
 
 
@@ -409,8 +414,9 @@ def documents(course_dir: pathlib.Path) -> list:
 def sync(only: str | None, dry_run: bool,
          sin_referencias: bool = False) -> None:
     if not courses():
-        sys.exit("No hay nada archivado todavía. Ejecuta primero:\n"
-                 "  python3 archiver.py")
+        from archiver import _cmd  # inacap only where its launcher exists
+
+        sys.exit(f"No hay nada archivado todavía. Ejecuta primero:\n  {_cmd()}")
     names = manifest_names()
     state = load_json(STATE)
     total_new = total_failed = 0
@@ -500,6 +506,13 @@ def sync(only: str | None, dry_run: bool,
     if not dry_run:
         print(f"\n{total_new} fuente(s) nueva(s)"
               + (f", {total_failed} fallida(s)." if total_failed else "."))
+
+
+def _utf8_stdio() -> None:
+    """UTF-8 output; under pythonw.exe (the Windows bot) the streams are None."""
+    for stream in (sys.stdout, sys.stderr):
+        if stream is not None:
+            stream.reconfigure(encoding="utf-8", errors="replace")
 
 
 def self_test() -> None:
@@ -626,6 +639,22 @@ def self_test() -> None:
     assert new_references([], ya) == []
     assert new_references(["https://a.ej"], set()) == ["https://a.ej"]
 
+    # The CLI beside the interpreter wins, and on Windows it is notebooklm.exe:
+    # the daily task runs the venv's python without Scripts\ on PATH.
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        scripts = pathlib.Path(tmp)
+        (scripts / "notebooklm.exe").write_text("")
+        assert _cli_path(str(scripts / "python.exe")) == str(scripts / "notebooklm.exe")
+
+    # Run by the Windows bot under pythonw.exe, which has no stdout/stderr.
+    guardado = sys.stdout
+    sys.stdout = None
+    try:
+        _utf8_stdio()
+    finally:
+        sys.stdout = guardado
+
     state = {"a.pdf": {"source_id": "S1"}, "b.pdf": {"source_id": "S2"}}
     assert pending(["a.pdf", "b.pdf", "c.pdf"], state, {"S1", "S2"}) == ["c.pdf"]
     # A source deleted in NotebookLM must come back on the next run.
@@ -635,8 +664,7 @@ def self_test() -> None:
 
 
 if __name__ == "__main__":
-    for _s in (sys.stdout, sys.stderr):
-        _s.reconfigure(encoding="utf-8", errors="replace")
+    _utf8_stdio()
 
     ap = argparse.ArgumentParser(
         description="Sube el material archivado a NotebookLM, un cuaderno por ramo.")

@@ -16,6 +16,23 @@
     if (-not $dir) { $dir = Join-Path $HOME 'INACAP-Archiver' }
 
     try {
+        # The inacap.cmd launcher bakes this path in. cmd.exe reads a .cmd in the
+        # OEM code page and expands % even inside quotes, so the part of the path
+        # outside the user's profile must be plain ASCII without %. Checked
+        # before downloading anything. (Resolved against PowerShell's location,
+        # not .NET's current directory, which can differ.)
+        $full = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($dir)
+        $rest = $full
+        $launch = $full
+        if ($full.StartsWith($env:USERPROFILE + '\', [StringComparison]::OrdinalIgnoreCase)) {
+            # %USERPROFILE% expands to the profile intact, even "José".
+            $rest = $full.Substring($env:USERPROFILE.Length)
+            $launch = '%USERPROFILE%' + $rest
+        }
+        if ($rest -match '[^\x20-\x7E]|%') {
+            throw "La carpeta $full tiene tildes, ñ o % fuera de tu carpeta de usuario, y el comando inacap no funcionaría ahí. Elige otra con INACAP_DIR (por ejemplo, una dentro de $env:USERPROFILE)."
+        }
+
         Step "Descargando INACAP Archiver en $dir"
         $tmp = Join-Path ([IO.Path]::GetTempPath()) ("inacap-" + [guid]::NewGuid())
         New-Item -ItemType Directory -Path $tmp | Out-Null
@@ -58,6 +75,19 @@
             & $py -m playwright install chromium
             Check "instalar el navegador"
 
+            Step "Creando el comando inacap"
+            $bin = $env:XDG_BIN_HOME
+            if (-not $bin) { $bin = Join-Path $HOME '.local\bin' }
+            New-Item -ItemType Directory -Force -Path $bin | Out-Null
+            [IO.File]::WriteAllText((Join-Path $bin 'inacap.cmd'),
+                "@`"$launch\.venv\Scripts\python.exe`" `"$launch\archiver.py`" %*`r`n")
+            # Puts $bin on PATH for new windows if uv was already installed elsewhere.
+            # Not redirected: under 'Stop', 5.1 turns redirected stderr into an error.
+            & $uv tool update-shell
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host "Aviso: no pude agregar $bin al PATH. Si 'inacap' no funciona en una ventana nueva, agrega esa carpeta al PATH a mano." -ForegroundColor Yellow
+            }
+
             Step "Configurando tus credenciales de INACAP"
             & $py archiver.py --setup
             Check "configurar las credenciales"
@@ -73,8 +103,13 @@
             Pop-Location
         }
 
-        Write-Host "`nListo. El archivo de tu material queda en $dir\archive" -ForegroundColor Green
-        Write-Host "Para actualizar o cambiar tu contraseña, vuelve a ejecutar el mismo comando."
+        Write-Host "`nListo. Tu material queda en $dir\archive" -ForegroundColor Green
+        Write-Host "`nAbre una ventana nueva de PowerShell y usa:"
+        Write-Host "  inacap              baja tu material ahora"
+        Write-Host "  inacap --setup      cambia tu contraseña o activa Telegram y NotebookLM"
+        Write-Host "  inacap --check      revisa que todo esté en orden"
+        Write-Host "  inacap --uninstall  lo quita todo de este equipo"
+        Write-Host "Para actualizar, vuelve a ejecutar el mismo comando de instalación."
     } catch {
         Write-Host "`nLa instalación se detuvo: $_" -ForegroundColor Red
         Write-Host "Puedes volver a ejecutar el mismo comando. Si se repite, abre un issue pegando lo que ves:"
