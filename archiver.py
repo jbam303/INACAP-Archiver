@@ -2332,8 +2332,10 @@ def _extras_test() -> None:
 
     # A requests error message carries the URL, and the URL carries the token;
     # the installer asks students to paste errors into a public issue.
-    url = "https://api.telegram.org/bot123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw/getMe"
-    assert "AAHdq" not in _redact(f"ConnectionError: {url} timed out"), _redact(url)
+    # Built at run time: a literal token here trips GitHub's secret scanning.
+    fake = "123456789:" + "Ab9_-" * 7
+    url = f"https://api.telegram.org/bot{fake}/getMe"
+    assert fake not in _redact(f"ConnectionError: {url} timed out"), _redact(url)
     assert _redact("Error a las 12:30, código 404") == "Error a las 12:30, código 404"
 
     # Hints name the short command only when this install's launcher exists.
